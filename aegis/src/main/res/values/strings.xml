@@ -8,4 +8,99 @@
     -->
     <string name="app_name">Understory OTP</string>
     <string name="ime_label">Understory OTP keyboard</string>
+
+    <!-- ==== Crash / fatal ==== -->
+    <string name="fatal_start_title">Understory OTP couldn\'t start</string>
+    <string name="fatal_start_reason">The app hit an unexpected error while starting up. Details are below.</string>
+
+    <!-- ==== Setup ==== -->
+    <string name="title_setup">First-time setup</string>
+    <string name="setup_intro">Understory OTP self-generates a 256-bit master key, self-encrypts it under a hardware-backed Keystore key, and self-binds it to this device\'s screen lock. The master is never displayed and never typed. To unlock the vault, you authenticate with your device biometric or PIN.</string>
+    <string name="setup_backup_note">Understory OTP keeps your seeds encrypted on this device only. To survive a lost or reset phone — or a biometric / screen-lock change, which by design destroys the key — export a backup after setup: an Understory encrypted file, or an Aegis Authenticator-compatible JSON. There\'s an Export button on the main screen.</string>
+    <string name="action_self_generate">Self-generate vault</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_close">Close</string>
+    <string name="setup_authenticate">Authenticate with your device to bind the vault master key.</string>
+    <string name="err_setup_failed">Setup failed: %1$s</string>
+    <string name="err_auth_failed">Authentication failed: %1$s</string>
+    <string name="msg_auth_cancelled">Authentication cancelled.</string>
+    <string name="err_crypto_init">Crypto init failed: %1$s</string>
+
+    <!-- ==== Unlock ==== -->
+    <string name="title_unlock">Unlock</string>
+    <string name="unlock_authenticate">Authenticate with your device biometric or PIN.</string>
+    <string name="action_unlock">Unlock with device auth</string>
+    <string name="action_authenticating">Authenticating…</string>
+    <string name="err_vault_decrypt">Vault decryption failed.</string>
+
+    <!-- ==== Device unsupported ==== -->
+    <string name="err_no_screen_lock">Device screen lock required.\n\nUnderstory OTP binds the vault key to your device\'s PIN / pattern / biometric. Set up a screen lock in system Settings, then come back.</string>
+    <string name="err_biometric_unavailable">BiometricPrompt unavailable (status %1$d). Configure a strong biometric or device credential in system Settings.</string>
+
+    <!-- ==== List ==== -->
+    <string name="entries_count">%1$d entries</string>
+    <string name="a11y_warning">%1$d third-party accessibility service(s) active. TOTP codes are visible on screen — accessibility services can read them. Tap \"Review\" to open system settings.</string>
+    <string name="action_review_a11y">Review accessibility services</string>
+    <string name="nudge_export">Make a backup so a biometric change or a lost phone doesn\'t lose your codes. Tap Export.</string>
+    <string name="action_export">Export</string>
+    <string name="action_later">Later</string>
+    <string name="action_add_entry">Add entry</string>
+    <string name="action_lock">Lock</string>
+    <string name="action_restore">Restore</string>
+    <string name="action_keyboard">Keyboard</string>
+    <string name="action_diagnostics">Diagnostics</string>
+    <string name="empty_no_entries_title">No entries yet</string>
+    <string name="empty_no_entries_body">Tap \"Add entry\" to add a code, or Restore to import a backup.</string>
+    <string name="no_issuer">(no issuer)</string>
+
+    <!-- Copy-window honesty (CD-4e): the clipboard auto-clear is a best-effort
+         timer that does NOT survive the app process being killed, so the copy
+         says "tries to clear", not a hard guarantee. -->
+    <string name="msg_code_copied_totp">Code copied — clipboard auto-clear attempted after %1$ds (not guaranteed if the app is killed first)</string>
+    <string name="msg_code_copied_hotp">Code copied — counter advanced to %1$d. Clipboard auto-clear attempted after 60s (not guaranteed if the app is killed first)</string>
+    <string name="err_generate_failed">Generate failed: %1$s</string>
+
+    <!-- HOTP row -->
+    <string name="hotp_meta">%1$sHOTP · counter %2$d</string>
+    <string name="hotp_meta_account">%1$s · </string>
+    <string name="action_generate_next">Generate next code</string>
+    <string name="cd_generate_next">Generate next HOTP code and copy it</string>
+
+    <!-- Entry row a11y -->
+    <string name="cd_totp_row">%1$s %2$s, TOTP, double-tap to copy the current code, long-press to delete</string>
+    <string name="cd_hotp_row">%1$s %2$s, HOTP, use the Generate next code button, long-press to delete</string>
+    <string name="cd_countdown">%1$d seconds until the code changes</string>
+
+    <!-- ==== Delete dialog ==== -->
+    <string name="dialog_delete_title">Delete this 2FA entry?</string>
+    <string name="dialog_delete_body">Removing this entry permanently destroys the secret in this vault. You won\'t be able to generate codes for this account again unless you re-enroll with the original issuer or restore from a backup.</string>
+    <string name="action_delete">Delete</string>
+    <string name="msg_entry_deleted">Entry deleted</string>
+    <string name="err_delete_failed">Delete failed: %1$s</string>
+
+    <!-- ==== Add ==== -->
+    <string name="title_add">Add entry</string>
+    <string name="add_intro">Three options:\n  •  Pick a screenshot of a QR code from your gallery\n  •  Paste a full otpauth:// URI directly\n  •  Paste a base32 secret (Google Authenticator-style)\n\nIssuer / account are optional if the QR or URI provides them.</string>
+    <string name="action_pick_qr">Pick QR screenshot from gallery</string>
+    <string name="action_import_file">Import from file (otpauth-migration / Proton / Aegis)</string>
+    <string name="state_working">Working…</string>
+    <string name="msg_qr_no_code">Couldn\'t read a QR from that image. Try a clearer screenshot.</string>
+    <string name="msg_qr_decoded">QR decoded — secret populated. Review issuer/account and Save.</string>
+    <string name="msg_google_empty">Google Auth export had no entries.</string>
+    <string name="msg_google_imported">Imported %1$d entries (skipped %2$d duplicates) from Google Authenticator%3$s</string>
+    <string name="msg_google_batch"> (batch %1$d/%2$d — re-run import for the remaining batches)</string>
+    <string name="err_google_parse">Couldn\'t parse Google Auth export: %1$s</string>
+    <string name="msg_no_entries_in_file">No entries found in that file%1$s.</string>
+    <string name="msg_file_imported">Imported %1$d entries (skipped %2$d duplicates)%3$s.%4$s</string>
+    <string name="err_import_failed">Import failed: %1$s</string>
+    <string name="label_issuer">Issuer (e.g. Google)</string>
+    <string name="label_account">Account (e.g. you@example.com)</string>
+    <string name="label_secret">Secret or otpauth:// URI</string>
+    <string name="action_show">Show</string>
+    <string name="action_hide">Hide</string>
+    <string name="err_parse_input">Couldn\'t parse: %1$s</string>
+    <string name="err_parse_generic">invalid input</string>
+    <string name="err_secret_empty">Secret is empty.</string>
+    <string name="err_save_failed">Save failed: %1$s</string>
+    <string name="action_save">Save</string>
 </resources>

@@ -197,10 +197,12 @@
             <!--
               Open-with intent filter: aegis appears in the system
               "Open with…" dialog when the user picks a JSON / text
-              export from a file manager or Drive. Same posture as
-              passgen — user explicitly chooses aegis at this step,
-              then has to unlock with biometric, then has to confirm
-              the import. No code path bypasses either gate.
+              export from a file manager or Drive. The user explicitly
+              chooses aegis at this step and must unlock with biometric
+              before the file is read; on unlock the file is parsed and
+              merged (deduplicated) into the vault, and a summary of what
+              was imported is shown. No code path bypasses the biometric
+              gate.
             -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

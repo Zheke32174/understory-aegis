@@ -5,7 +5,6 @@ import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.os.Debug
-import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -15,7 +14,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,47 +21,47 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import android.content.Intent
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import com.understory.security.A11yProbe
 import com.understory.security.Crypto
 import com.understory.security.Diagnostics
@@ -77,21 +75,29 @@ import com.understory.security.Tamper
 import com.understory.security.TestingMode
 import com.understory.security.VaultImportScreen
 import com.understory.security.VaultRecovery
-import com.understory.security.VaultRecoveryScreen
 import com.understory.security.ui.Bg
+import com.understory.security.ui.components.EmptyState
+import com.understory.security.ui.components.FatalScreen
+import com.understory.security.ui.components.SuiteCard
+import com.understory.security.ui.components.SuiteScaffold
+import com.understory.security.ui.theme.UnderstoryAccent
+import com.understory.security.ui.theme.UnderstoryTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.crypto.Cipher
 
 /**
- * Aegis — local TOTP/HOTP authenticator. Phase A:
- *   - BiometricPrompt-gated setup + unlock (matches passgen)
- *   - List view with auto-refreshing 30s codes
- *   - Manual entry add (issuer / account / base32 secret)
- *   - Tap a code → copies to clipboard with EXTRA_IS_SENSITIVE
+ * Aegis (store name "Understory OTP") — local TOTP/HOTP authenticator:
+ *   - BiometricPrompt-gated setup + unlock
+ *   - List view with auto-refreshing codes (parameter-correct via AegisCode)
+ *   - Manual entry add + QR / file import
+ *   - Tap a TOTP code → copies to clipboard with EXTRA_IS_SENSITIVE; HOTP has a
+ *     deliberate "Generate next code" advance
+ *   - Invalidated-key recovery, reachable export, and a scoped-unlock IME
  *
- * Phase B will add: gallery-only QR import, IME mode, edit/delete.
+ * Wave-3 GUI pass: every screen is wrapped in [UnderstoryTheme] and built from
+ * the shared token roles + components; user-facing copy is in strings.xml.
  */
 class MainActivity : FragmentActivity() {
 
@@ -107,6 +113,10 @@ class MainActivity : FragmentActivity() {
     // opening a file while the task is already alive no longer silently drops it.
     private val pendingImportUri = androidx.compose.runtime.mutableStateOf<android.net.Uri?>(null)
 
+    // Set when initialize() refused to run (tamper/attestation hard-fail). Drives
+    // an honest FatalScreen instead of a bare finishAndRemoveTask() vanish (CD-4c).
+    private val fatalReason = androidx.compose.runtime.mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         DiagnosticsDump.activateIfEng(this)
         Diagnostics.log("aegis.MainActivity", "onCreate (savedInstanceState=${savedInstanceState != null})")
@@ -116,11 +126,12 @@ class MainActivity : FragmentActivity() {
         } catch (t: Throwable) {
             Diagnostics.error("aegis.MainActivity", "onCreate threw: ${t.javaClass.simpleName}: ${t.message}")
             setContent {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text("aegis crash", color = Color(0xFFEF5350), fontSize = 18.sp)
-                        Text(t.toString(), color = Color(0xFFE0E0E0), fontSize = 11.sp)
-                    }
+                UnderstoryTheme(accent = UnderstoryAccent.AEGIS) {
+                    FatalScreen(
+                        title = stringResource(R.string.fatal_start_title),
+                        reason = stringResource(R.string.fatal_start_reason),
+                        details = t.toString(),
+                    )
                 }
             }
         }
@@ -138,7 +149,13 @@ class MainActivity : FragmentActivity() {
             Tamper.check(applicationContext).hardFail ||
             com.understory.security.SuiteAttestation.verify(applicationContext).hardFail
         ) {
-            finishAndRemoveTask(); return
+            // CD-4c: don't vanish silently. Tell the user why the app refused to
+            // continue, then let them dismiss it (which finishes the task).
+            Diagnostics.error("aegis.MainActivity", "integrity hard-fail — refusing to run")
+            fatalReason.value = when {
+                debuggerAttached -> "A debugger is attached."
+                else -> "The app failed its integrity / signature check on this device."
+            }
         }
 
         // TestingMode.ALLOW_SCREENSHOTS == true skips this so we can
@@ -163,17 +180,23 @@ class MainActivity : FragmentActivity() {
         runCatching { WindowCompat.setDecorFitsSystemWindows(window, false) }
 
         // ACTION_VIEW with content URI: user picked a JSON / text export
-        // and chose aegis from the system "Open with…" dialog. Pull the
-        // URI here so it flows through unlock and lands in the import
-        // screen with content pre-loaded — the user still has to unlock
-        // with biometric and confirm explicitly. Mirrors passgen's flow.
+        // and chose Understory OTP from the system "Open with…" dialog. Pull
+        // the URI here so it flows through unlock and lands in the import
+        // screen with content pre-loaded — the user still has to unlock with
+        // biometric before anything is read. Mirrors passgen's flow.
         if (intent?.action == android.content.Intent.ACTION_VIEW) {
             pendingImportUri.value = intent?.data
         }
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+            UnderstoryTheme(accent = UnderstoryAccent.AEGIS) {
+                val fatal = fatalReason.value
+                if (fatal != null) {
+                    FatalScreen(
+                        title = stringResource(R.string.fatal_start_title),
+                        reason = fatal,
+                    )
+                } else {
                     AegisRoot(
                         activity = this,
                         unlockedRef = ::unlocked,
@@ -255,14 +278,16 @@ class MainActivity : FragmentActivity() {
         Diagnostics.log("aegis.MainActivity", "onResume")
         Tamper.invalidate()
         if (Tamper.check(applicationContext).hardFail) {
-            Diagnostics.error("aegis.MainActivity", "Tamper.check hardFail on resume — finishing")
-            finishAndRemoveTask()
+            Diagnostics.error("aegis.MainActivity", "Tamper.check hardFail on resume — surfacing fatal")
+            unlocked?.lock()
+            unlocked = null
+            fatalReason.value = "The app failed its integrity check while running."
         }
     }
 
     /**
-     * Warm-task "Open with aegis" (design §6 D-S2). launchMode="singleTask"
-     * means a second VIEW intent arrives here, not through onCreate, so the old
+     * Warm-task "Open with…" (design §6 D-S2). launchMode="singleTask" means a
+     * second VIEW intent arrives here, not through onCreate, so the old
      * onCreate-only read silently dropped it. Stash the URI in the observable
      * holder and setIntent so recreation sees it too; the composition's
      * unlock-gated import path picks it up.
@@ -437,7 +462,7 @@ private fun AegisRoot(
 private fun deviceUnsupportedReason(ctx: Context): String? {
     val km = ctx.getSystemService(KeyguardManager::class.java)
     if (km == null || !km.isDeviceSecure) {
-        return "Device screen lock required.\n\nAegis binds the vault key to your device's PIN / pattern / biometric. Set up a screen lock in system Settings, then come back."
+        return ctx.getString(R.string.err_no_screen_lock)
     }
     val bm = BiometricManager.from(ctx)
     val canAuth = bm.canAuthenticate(
@@ -445,7 +470,7 @@ private fun deviceUnsupportedReason(ctx: Context): String? {
             BiometricManager.Authenticators.DEVICE_CREDENTIAL,
     )
     if (canAuth != BiometricManager.BIOMETRIC_SUCCESS) {
-        return "BiometricPrompt unavailable (status $canAuth). Configure a strong biometric or device credential in system Settings."
+        return ctx.getString(R.string.err_biometric_unavailable, canAuth)
     }
     return null
 }
@@ -461,66 +486,83 @@ private fun SetupScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val deviceIssue = remember { deviceUnsupportedReason(ctx) }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("aegis — first-time setup", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        if (deviceIssue != null) {
-            Box(modifier = Modifier.fillMaxWidth().background(Color(0xFF3D2A00), RoundedCornerShape(6.dp)).padding(12.dp)) {
-                Text(deviceIssue, color = Color(0xFFFFB74D), fontSize = 12.sp)
-            }
-            SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close") }
-            return@Column
-        }
-        when (step) {
-            0 -> {
-                Text(
-                    "Aegis self-generates a 256-bit master key, self-encrypts it under a hardware-backed Keystore key, and self-binds it to this device's screen lock. The master is never displayed and never typed. To unlock the vault, you authenticate with your device biometric or PIN.",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp,
-                )
-                Box(modifier = Modifier.fillMaxWidth().background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp)).padding(12.dp)) {
+    SuiteScaffold(title = stringResource(R.string.title_setup)) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
+        ) {
+            if (deviceIssue != null) {
+                SuiteCard {
                     Text(
-                        "aegis keeps your seeds encrypted on this device only. To survive a " +
-                            "lost or reset phone — or a biometric / screen-lock change, which by " +
-                            "design destroys the key — export a backup after setup: an Understory " +
-                            "encrypted file, or an Aegis Authenticator-compatible JSON. There's an " +
-                            "Export button on the main screen.",
-                        color = Color(0xFFFFB74D), fontSize = 11.sp,
+                        deviceIssue,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = UnderstoryTheme.semantic.warning,
                     )
                 }
-                SecureButton(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Self-generate vault")
+                SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.action_close))
                 }
-                SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+                return@Column
             }
-            1 -> {
-                Text("Authenticate with your device to bind the vault master key.",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp)
-                error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-                LaunchedEffect(Unit) {
-                    runCatching {
-                        val cipher = Crypto.deviceAuthCipherForEncrypt()
-                        promptAuth(activity, "Bind aegis vault to this device", cipher,
-                            onSuccess = { authed ->
-                                runCatching {
-                                    val v = AegisVault.createV2(ctx, authed)
-                                    // Gate on activity state: if BiometricPrompt
-                                    // succeeded after the user backgrounded us,
-                                    // don't surface an unlocked vault to in-process
-                                    // peers (the IME) without UI present. Lock and
-                                    // require a fresh prompt on return.
-                                    if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                                        onCreated(v)
-                                    } else {
-                                        v.lock()
-                                    }
-                                }.onFailure { error = "Setup failed: ${it.message}" }
-                            },
-                            onError = { msg -> error = "Authentication failed: $msg" },
-                            onCancel = { error = "Authentication cancelled."; step = 0 },
+            when (step) {
+                0 -> {
+                    Text(
+                        stringResource(R.string.setup_intro),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SuiteCard {
+                        Text(
+                            stringResource(R.string.setup_backup_note),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = UnderstoryTheme.semantic.warning,
                         )
-                    }.onFailure { error = "Crypto init failed: ${it.message}" }
+                    }
+                    SecureButton(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.action_self_generate))
+                    }
+                    SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+                1 -> {
+                    Text(
+                        stringResource(R.string.setup_authenticate),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    error?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                    LaunchedEffect(Unit) {
+                        runCatching {
+                            val cipher = Crypto.deviceAuthCipherForEncrypt()
+                            promptAuth(activity, "Bind Understory OTP vault to this device", cipher,
+                                onSuccess = { authed ->
+                                    runCatching {
+                                        val v = AegisVault.createV2(ctx, authed)
+                                        // Gate on activity state: if BiometricPrompt
+                                        // succeeded after the user backgrounded us,
+                                        // don't surface an unlocked vault to in-process
+                                        // peers (the IME) without UI present. Lock and
+                                        // require a fresh prompt on return.
+                                        if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                                            onCreated(v)
+                                        } else {
+                                            v.lock()
+                                        }
+                                    }.onFailure { error = ctx.getString(R.string.err_setup_failed, it.message ?: "") }
+                                },
+                                onError = { msg -> error = ctx.getString(R.string.err_auth_failed, msg) },
+                                onCancel = { error = ctx.getString(R.string.msg_auth_cancelled); step = 0 },
+                            )
+                        }.onFailure { error = ctx.getString(R.string.err_crypto_init, it.message ?: "") }
+                    }
                 }
             }
         }
@@ -538,64 +580,80 @@ private fun UnlockScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("aegis — unlock", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        Text("Authenticate with your device biometric or PIN.",
-            color = Color(0xFF9E9E9E), fontSize = 13.sp)
-        error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-
-        SecureButton(
-            onClick = {
-                if (working) return@SecureButton
-                working = true; error = null
-                runCatching {
-                    val iv = AegisVault.ivForUnlock(ctx)
-                    val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
-                    promptAuth(activity, "Unlock aegis vault", cipher,
-                        onSuccess = { authed ->
-                            runCatching {
-                                val v = AegisVault.unlockV2(ctx, authed)
-                                // Same lifecycle gate as setup: if the user
-                                // backgrounded mid-prompt, lock immediately.
-                                if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                                    onUnlocked(v)
-                                } else {
-                                    v.lock()
-                                    working = false
-                                }
-                            }.onFailure { t ->
-                                // Route a destroyed key to Recovery, not a
-                                // dead-end (design §4.2).
-                                working = false
-                                if (VaultRecovery.classifyUnlockFailure(t) ==
-                                    VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
-                                ) onInvalidated()
-                                else error = "Vault decryption failed."
-                            }
-                        },
-                        onError = { msg ->
-                            error = "Authentication failed: $msg"; working = false
-                        },
-                        onCancel = {
-                            error = "Authentication cancelled."; working = false
-                        },
-                    )
-                }.onFailure { t ->
-                    working = false
-                    if (VaultRecovery.classifyUnlockFailure(t) ==
-                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
-                    ) onInvalidated()
-                    else error = "Crypto init failed: ${t.message}"
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
+    SuiteScaffold(title = stringResource(R.string.title_unlock)) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
         ) {
-            Text(if (working) "Authenticating…" else "Unlock with device auth")
+            Text(
+                stringResource(R.string.unlock_authenticate),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            error?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
+            }
+
+            SecureButton(
+                onClick = {
+                    if (working) return@SecureButton
+                    working = true; error = null
+                    runCatching {
+                        val iv = AegisVault.ivForUnlock(ctx)
+                        val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
+                        promptAuth(activity, "Unlock Understory OTP vault", cipher,
+                            onSuccess = { authed ->
+                                runCatching {
+                                    val v = AegisVault.unlockV2(ctx, authed)
+                                    // Same lifecycle gate as setup: if the user
+                                    // backgrounded mid-prompt, lock immediately.
+                                    if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                                        onUnlocked(v)
+                                    } else {
+                                        v.lock()
+                                        working = false
+                                    }
+                                }.onFailure { t ->
+                                    // Route a destroyed key to Recovery, not a
+                                    // dead-end (design §4.2).
+                                    working = false
+                                    if (VaultRecovery.classifyUnlockFailure(t) ==
+                                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                                    ) onInvalidated()
+                                    else error = ctx.getString(R.string.err_vault_decrypt)
+                                }
+                            },
+                            onError = { msg ->
+                                error = ctx.getString(R.string.err_auth_failed, msg); working = false
+                            },
+                            onCancel = {
+                                error = ctx.getString(R.string.msg_auth_cancelled); working = false
+                            },
+                        )
+                    }.onFailure { t ->
+                        working = false
+                        if (VaultRecovery.classifyUnlockFailure(t) ==
+                            VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                        ) onInvalidated()
+                        else error = ctx.getString(R.string.err_crypto_init, t.message ?: "")
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (working) stringResource(R.string.action_authenticating)
+                    else stringResource(R.string.action_unlock),
+                )
+            }
+            SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_close))
+            }
         }
-        SecureOutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close") }
     }
 }
 
@@ -624,7 +682,7 @@ private fun promptAuth(
     val prompt = BiometricPrompt(activity, executor, callback)
     val info = BiometricPrompt.PromptInfo.Builder()
         .setTitle(title)
-        .setSubtitle("aegis vault")
+        .setSubtitle("Understory OTP vault")
         .setAllowedAuthenticators(
             BiometricManager.Authenticators.BIOMETRIC_STRONG or
                 BiometricManager.Authenticators.DEVICE_CREDENTIAL,
@@ -660,8 +718,8 @@ private fun ListScreen(
 
     // Surface third-party accessibility services, since they can read on-
     // screen text. TOTP codes are by definition visible — if a malicious
-    // a11y service is enabled, our 30s codes would leak. The banner makes
-    // the threat surface explicit.
+    // a11y service is enabled, our codes would leak. The banner makes the
+    // threat surface explicit.
     val a11yState = remember { A11yProbe.check(ctx) }
 
     // Long-press on a row stages the entry for deletion. Confirmation
@@ -671,126 +729,122 @@ private fun ListScreen(
     // the unlocked vault and Compose otherwise won't observe the swap.
     var revision by remember { mutableStateOf(0) }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("aegis", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-                Text("${vault.contents.entries.size} entries",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp)
+    SuiteScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            TextButton(onClick = onLock) { Text(stringResource(R.string.action_lock)) }
+        },
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+        ) {
+            Text(
+                stringResource(R.string.entries_count, vault.contents.entries.size),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (a11yState.activeServiceCount > 0) {
+                SuiteCard {
+                    Text(
+                        stringResource(R.string.a11y_warning, a11yState.activeServiceCount),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = UnderstoryTheme.semantic.warning,
+                    )
+                }
+                SecureOutlinedButton(
+                    onClick = { A11yProbe.openA11ySettings(ctx) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.action_review_a11y))
+                }
             }
-        }
-        if (a11yState.activeServiceCount > 0) {
-            Box(
-                modifier = Modifier.fillMaxWidth()
-                    .background(Color(0xFF3D2A00), RoundedCornerShape(6.dp))
-                    .padding(10.dp),
-            ) {
-                Text(
-                    "⚠  ${a11yState.activeServiceCount} third-party accessibility service(s) active. " +
-                        "TOTP codes are visible on screen — accessibility services can read them. " +
-                        "Tap \"Review\" to open system settings.",
-                    color = Color(0xFFFFB74D), fontSize = 11.sp,
+            // Export-first nudge: shown until dismissed. Ties recovery to §3 export.
+            if (!nudgeDismissed && vault.contents.entries.isNotEmpty()) {
+                SuiteCard {
+                    Text(
+                        stringResource(R.string.nudge_export),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
+                    SecureButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_export)) }
+                    SecureOutlinedButton(onClick = { nudgeDismissed = true }, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_later)) }
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
+                SecureButton(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_add_entry)) }
+                SecureOutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_export)) }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
+                SecureOutlinedButton(onClick = onImport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_restore)) }
+                SecureOutlinedButton(onClick = onKeyboard, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_keyboard)) }
+            }
+            if (vault.contents.entries.isEmpty()) {
+                EmptyState(
+                    title = stringResource(R.string.empty_no_entries_title),
+                    body = stringResource(R.string.empty_no_entries_body),
+                    modifier = Modifier.weight(1f),
                 )
-            }
-            SecureOutlinedButton(
-                onClick = { A11yProbe.openA11ySettings(ctx) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Review accessibility services")
-            }
-        }
-        // Export-first nudge: shown until dismissed. Ties recovery to §3 export.
-        if (!nudgeDismissed && vault.contents.entries.isNotEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxWidth()
-                    .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
-                    .padding(10.dp),
-            ) {
-                Text(
-                    "Make a backup so a biometric change or a lost phone doesn't lose " +
-                        "your codes. Tap Export.",
-                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
-                )
-            }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SecureButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Export") }
-                SecureOutlinedButton(onClick = { nudgeDismissed = true }, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Later") }
-            }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SecureButton(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Add entry") }
-            SecureOutlinedButton(onClick = onLock, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Lock") }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SecureOutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Export") }
-            SecureOutlinedButton(onClick = onImport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Restore") }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SecureOutlinedButton(onClick = onKeyboard, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Keyboard") }
-        }
-        if (vault.contents.entries.isEmpty()) {
-            Spacer(Modifier.height(20.dp))
-            Text("No entries yet. Tap \"Add entry\" to add one.",
-                color = Color(0xFF9E9E9E), fontSize = 13.sp)
-            Spacer(Modifier.weight(1f))
-        } else {
-            // revision is read so Compose treats the LazyColumn as dirty after
-            // a delete swap.
-            @Suppress("UNUSED_EXPRESSION") revision
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth().weight(1f),
-            ) {
-                items(vault.contents.entries, key = { it.id }) { entry ->
-                    if (entry.type == OtpAuthEntry.Type.HOTP) {
-                        HotpRow(
-                            entry = entry,
-                            onGenerate = {
-                                runCatching {
-                                    // Advance + persist BEFORE copying; propagate
-                                    // on save failure (no code served on desync).
-                                    val code = AegisCode.advanceHotp(vault, entry)
-                                    // HOTP codes don't expire on a clock; fixed 60s
-                                    // clipboard window, advertised honestly.
-                                    copyCodeToClipboard(ctx, code, windowSeconds = 60)
-                                    revision++
-                                    val newCounter = entry.counter + 1
-                                    Toast.makeText(
-                                        ctx,
-                                        "Code copied — counter advanced to $newCounter (60s clipboard window)",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                }.onFailure {
-                                    Toast.makeText(ctx, "Generate failed: ${it.message}", Toast.LENGTH_LONG).show()
-                                }
-                            },
-                            onLongPress = { deleteCandidate = entry },
-                        )
-                    } else {
-                        EntryRow(
-                            entry = entry,
-                            nowSeconds = tickSeconds,
-                            onTap = { code ->
-                                // Copy window = the entry's real period, and the
-                                // toast reads the SAME number (one source of truth,
-                                // design §5.4). Clear at the entry's period.
-                                copyCodeToClipboard(ctx, code, windowSeconds = entry.period)
-                                Toast.makeText(ctx, "Code copied (${entry.period}s clipboard window)",
-                                    Toast.LENGTH_SHORT).show()
-                            },
-                            onLongPress = { deleteCandidate = entry },
-                        )
+            } else {
+                // revision is read so Compose treats the LazyColumn as dirty
+                // after a delete swap.
+                @Suppress("UNUSED_EXPRESSION") revision
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.xs),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                ) {
+                    items(vault.contents.entries, key = { it.id }) { entry ->
+                        if (entry.type == OtpAuthEntry.Type.HOTP) {
+                            HotpRow(
+                                entry = entry,
+                                onGenerate = {
+                                    runCatching {
+                                        // Advance + persist BEFORE copying; propagate
+                                        // on save failure (no code served on desync).
+                                        val code = AegisCode.advanceHotp(vault, entry)
+                                        // HOTP codes don't expire on a clock; best-effort
+                                        // 60s clipboard clear, advertised honestly.
+                                        copyCodeToClipboard(ctx, code, windowSeconds = 60)
+                                        revision++
+                                        val newCounter = entry.counter + 1
+                                        Toast.makeText(
+                                            ctx,
+                                            ctx.getString(R.string.msg_code_copied_hotp, newCounter),
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }.onFailure {
+                                        Toast.makeText(ctx, ctx.getString(R.string.err_generate_failed, it.message ?: ""), Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                onLongPress = { deleteCandidate = entry },
+                            )
+                        } else {
+                            EntryRow(
+                                entry = entry,
+                                nowSeconds = tickSeconds,
+                                onTap = { code ->
+                                    // Copy window = the entry's real period, and the
+                                    // toast reads the SAME number (one source of truth,
+                                    // design §5.4). Best-effort clear at the period.
+                                    copyCodeToClipboard(ctx, code, windowSeconds = entry.period)
+                                    Toast.makeText(ctx, ctx.getString(R.string.msg_code_copied_totp, entry.period),
+                                        Toast.LENGTH_SHORT).show()
+                                },
+                                onLongPress = { deleteCandidate = entry },
+                            )
+                        }
                     }
                 }
             }
+            SecureOutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_diagnostics))
+            }
         }
-        SecureOutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
-            Text("Diagnostics")
-        }
-        com.understory.security.SuiteStatusFooter()
     }
 
     // Caution dialog: irreversible removal of a 2FA secret means losing
@@ -806,25 +860,24 @@ private fun ListScreen(
     deleteCandidate?.let { entry ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
-            title = { Text("Delete this 2FA entry?") },
+            title = { Text(stringResource(R.string.dialog_delete_title)) },
             text = {
                 val dialogView = LocalView.current
                 DisposableEffect(dialogView) {
                     dialogView.filterTouchesWhenObscured = true
                     onDispose { /* dialog tears down with view; nothing to undo */ }
                 }
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
                     Text(
-                        entry.issuer.ifEmpty { "(no issuer)" } +
+                        entry.issuer.ifEmpty { stringResource(R.string.no_issuer) } +
                             (if (entry.account.isNotEmpty()) " — ${entry.account}" else ""),
-                        color = Color(0xFFE0E0E0), fontSize = 14.sp,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
-                    Spacer(Modifier.height(10.dp))
                     Text(
-                        "Removing this entry permanently destroys the secret in this vault. " +
-                            "You won't be able to generate codes for this account again unless " +
-                            "you re-enroll with the original issuer or restore from a backup.",
-                        color = Color(0xFFFFB74D), fontSize = 12.sp,
+                        stringResource(R.string.dialog_delete_body),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = UnderstoryTheme.semantic.warning,
                     )
                 }
             },
@@ -843,17 +896,17 @@ private fun ListScreen(
                         )
                         vault.save()
                         revision++
-                        Toast.makeText(ctx, "Entry deleted", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(ctx, ctx.getString(R.string.msg_entry_deleted), Toast.LENGTH_SHORT).show()
                     }.onFailure {
-                        Toast.makeText(ctx, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(ctx, ctx.getString(R.string.err_delete_failed, it.message ?: ""), Toast.LENGTH_LONG).show()
                     }
                 }) {
-                    Text("Delete", color = Color(0xFFEF5350))
+                    Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { deleteCandidate = null }) {
-                    Text("Cancel")
+                    Text(stringResource(R.string.action_cancel))
                 }
             },
         )
@@ -876,37 +929,49 @@ private fun EntryRow(
         runCatching { AegisCode.totp(entry, nowSeconds) }.getOrDefault("-".repeat(entry.digits))
     }
     val secondsLeft = entry.period - (nowSeconds % entry.period).toInt()
+    val issuerText = entry.issuer.ifEmpty { stringResource(R.string.no_issuer) }
+    val rowDesc = stringResource(R.string.cd_totp_row, issuerText, entry.account)
 
     // Threat model: "screen is never secure even when device is" — codes are
-    // NEVER rendered to screen. Tap copies the current code to the clipboard
-    // (auto-clears at the period boundary); the row display stays redacted.
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF1C1C1C), RoundedCornerShape(8.dp))
-            .combinedClickable(
-                onClick = { onTap(code) },
-                onLongClick = onLongPress,
-            )
-            .padding(14.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    // NEVER rendered to screen. Tap copies the current code to the clipboard;
+    // the row display stays redacted.
+    SuiteCard(onClick = null) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { onTap(code) },
+                    onLongClick = onLongPress,
+                )
+                .semantics(mergeDescendants = true) { contentDescription = rowDesc },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(entry.issuer.ifEmpty { "(no issuer)" },
-                    color = Color(0xFFE0E0E0), fontSize = 14.sp)
+                Text(
+                    issuerText,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
                 if (entry.account.isNotEmpty()) {
-                    Text(entry.account, color = Color(0xFF9E9E9E), fontSize = 11.sp)
+                    Text(
+                        entry.account,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Bullets sized to the entry's digit count (6/7/8), so the row
                 // layout is stable and the real code never reaches the tree.
+                // Clear semantics: TalkBack announces the merged row description
+                // above, not the bullet glyphs.
                 Text(
                     text = AegisCode.bullets(entry.digits),
-                    color = Color(0xFF707070),
-                    fontSize = 22.sp,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.clearAndSetSemantics {},
                 )
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(UnderstoryTheme.spacing.md))
                 CountdownRing(
                     secondsLeft = secondsLeft,
                     period = entry.period,
@@ -929,44 +994,64 @@ private fun HotpRow(
     onGenerate: () -> Unit,
     onLongPress: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF1C1C1C), RoundedCornerShape(8.dp))
-            .combinedClickable(
-                onClick = { /* HOTP action is the explicit button, not the row */ },
-                onLongClick = onLongPress,
-            )
-            .padding(14.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(entry.issuer.ifEmpty { "(no issuer)" },
-                    color = Color(0xFFE0E0E0), fontSize = 14.sp)
+    val issuerText = entry.issuer.ifEmpty { stringResource(R.string.no_issuer) }
+    val rowDesc = stringResource(R.string.cd_hotp_row, issuerText, entry.account)
+    val accountPrefix = if (entry.account.isNotEmpty())
+        stringResource(R.string.hotp_meta_account, entry.account) else ""
+    SuiteCard(onClick = null) {
+        // The label column is long-pressable to delete and carries the row
+        // description; the "Generate next code" button stays a SEPARATE a11y
+        // node (not merged) so TalkBack can reach it as its own action.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .combinedClickable(
+                        onClick = { /* HOTP action is the explicit button, not the row */ },
+                        onLongClick = onLongPress,
+                    )
+                    .semantics(mergeDescendants = true) { contentDescription = rowDesc },
+            ) {
                 Text(
-                    (if (entry.account.isNotEmpty()) "${entry.account} · " else "") +
-                        "HOTP · counter ${entry.counter}",
-                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                    issuerText,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    stringResource(R.string.hotp_meta, accountPrefix, entry.counter),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            SecureButton(onClick = onGenerate) { Text("Generate next code") }
+            val genCd = stringResource(R.string.cd_generate_next)
+            SecureButton(
+                onClick = onGenerate,
+                modifier = Modifier.semantics { contentDescription = genCd },
+            ) {
+                Text(stringResource(R.string.action_generate_next))
+            }
         }
     }
 }
 
 /**
- * Circular countdown indicator. The ring shrinks from full → empty
- * over the TOTP period; color shifts green → amber → red as the
- * window expires. The numeric seconds-left is shown inside the ring.
- *
- * Drawn via Compose Canvas so we get clean anti-aliased arcs without
- * pulling in a chart library.
+ * Circular countdown indicator. The ring shrinks from full → empty over the
+ * TOTP period; color shifts success → warning → error as the window expires.
+ * The numeric seconds-left is shown inside the ring. Colors come from the
+ * shared semantic token roles.
  */
 @Composable
 private fun CountdownRing(secondsLeft: Int, period: Int) {
     val color = colorForCountdown(secondsLeft)
+    val ringBg = MaterialTheme.colorScheme.surfaceVariant
+    val cd = stringResource(R.string.cd_countdown, secondsLeft)
     Box(
-        modifier = Modifier.size(34.dp),
+        modifier = Modifier
+            .size(34.dp)
+            .semantics { contentDescription = cd },
         contentAlignment = Alignment.Center,
     ) {
         androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
@@ -974,7 +1059,7 @@ private fun CountdownRing(secondsLeft: Int, period: Int) {
             val sweepFraction = secondsLeft.toFloat() / period.coerceAtLeast(1)
             // Background ring (dim).
             drawArc(
-                color = Color(0xFF333333),
+                color = ringBg,
                 startAngle = -90f,
                 sweepAngle = 360f,
                 useCenter = false,
@@ -994,24 +1079,26 @@ private fun CountdownRing(secondsLeft: Int, period: Int) {
         }
         Text(
             "$secondsLeft",
+            style = MaterialTheme.typography.labelMedium,
             color = color,
-            fontSize = 11.sp,
+            modifier = Modifier.clearAndSetSemantics {},
         )
     }
 }
 
+@Composable
 private fun colorForCountdown(seconds: Int): Color = when {
-    seconds <= 5 -> Color(0xFFEF5350)
-    seconds <= 10 -> Color(0xFFFFB74D)
-    else -> Color(0xFF81C784)
+    seconds <= 5 -> MaterialTheme.colorScheme.error
+    seconds <= 10 -> UnderstoryTheme.semantic.warning
+    else -> UnderstoryTheme.semantic.success
 }
 
 /**
- * Copy a code to the system clipboard with the sensitive flag and an auto-clear
- * at [windowSeconds] — the SAME number the call site's toast advertises (one
- * source of truth, design §5.4). For TOTP pass the entry's real period; for
- * HOTP a fixed 60s. Previously this hardcoded 30s while the toast said the
- * entry's period, an honesty bug (A-M2).
+ * Copy a code to the system clipboard with the sensitive flag and a best-effort
+ * auto-clear at [windowSeconds] — the SAME number the call site's toast
+ * advertises (one source of truth, design §5.4). The clear is scheduled on a
+ * main-thread Handler and is NOT guaranteed to run if the app process is killed
+ * first; the toast copy says so honestly (CD-4e).
  */
 private fun copyCodeToClipboard(ctx: Context, code: String, windowSeconds: Int) {
     com.understory.security.Clipboard.copySensitive(
@@ -1058,7 +1145,7 @@ private fun AddScreen(
         scope.launch {
             val decoded = withContext(Bg.cpu) { QrDecoder.decode(ctx, uri) }
             if (decoded == null) {
-                qrFeedback = "Couldn't read a QR from that image. Try a clearer screenshot."
+                qrFeedback = ctx.getString(R.string.msg_qr_no_code)
                 working = false
                 return@launch
             }
@@ -1071,7 +1158,7 @@ private fun AddScreen(
                 val outcome = runCatching {
                     val import = withContext(Bg.cpu) { GoogleAuthMigration.parse(decoded) }
                     if (import.entries.isEmpty()) {
-                        return@runCatching "Google Auth export had no entries."
+                        return@runCatching ctx.getString(R.string.msg_google_empty)
                     }
                     // Route through the shared dedup-merge (design §3.4) so the
                     // QR path dedups exactly like the file path.
@@ -1082,18 +1169,18 @@ private fun AddScreen(
                         withContext(Bg.io) { vault.save() }
                     }
                     val batchNote = if (import.isMultiBatch) {
-                        " (batch ${import.batchIndex + 1}/${import.batchSize} — re-run import for the remaining batches)"
+                        ctx.getString(R.string.msg_google_batch, import.batchIndex + 1, import.batchSize)
                     } else ""
-                    "Imported ${result.added} entries (skipped ${result.skipped} duplicates) from Google Authenticator$batchNote"
+                    ctx.getString(R.string.msg_google_imported, result.added, result.skipped, batchNote)
                 }
-                qrFeedback = outcome.getOrElse { "Couldn't parse Google Auth export: ${it.message}" }
+                qrFeedback = outcome.getOrElse { ctx.getString(R.string.err_google_parse, it.message ?: "") }
                 working = false
                 return@launch
             }
 
             // Standard otpauth:// or raw secret path.
             secretInput = decoded
-            qrFeedback = "QR decoded — secret populated. Review issuer/account and Save."
+            qrFeedback = ctx.getString(R.string.msg_qr_decoded)
             runCatching {
                 val parsed = OtpAuthEntry.parse(decoded)
                 if (issuer.isBlank() && parsed.issuer.isNotEmpty()) issuer = parsed.issuer
@@ -1121,7 +1208,7 @@ private fun AddScreen(
                     val errs = if (summary.errors.isNotEmpty()) {
                         " (${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"})"
                     } else ""
-                    return@runCatching "No entries found in that file$errs."
+                    return@runCatching ctx.getString(R.string.msg_no_entries_in_file, errs)
                 }
                 val result = AegisMerge.merge(vault.contents.entries, summary.entries)
                 summary.entries.forEach { it.wipeSecret() }
@@ -1131,9 +1218,9 @@ private fun AddScreen(
                 }
                 val errPart = if (summary.errorCount > 0) " — ${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"} skipped" else ""
                 val batchPart = summary.multiBatchHint?.let { " ($it)" } ?: ""
-                "Imported ${result.added} entries (skipped ${result.skipped} duplicates)$errPart.$batchPart"
+                ctx.getString(R.string.msg_file_imported, result.added, result.skipped, errPart, batchPart)
             }
-            qrFeedback = outcome.getOrElse { "Import failed: ${it.message ?: it.javaClass.simpleName}" }
+            qrFeedback = outcome.getOrElse { ctx.getString(R.string.err_import_failed, it.message ?: it.javaClass.simpleName) }
             working = false
         }
     }
@@ -1161,160 +1248,176 @@ private fun AddScreen(
         }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("add entry", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        Text(
-            "Three options:\n" +
-                "  •  Pick a screenshot of a QR code from your gallery\n" +
-                "  •  Paste a full otpauth:// URI directly\n" +
-                "  •  Paste a base32 secret (Google Authenticator-style)\n\n" +
-                "Issuer / account are optional if the QR or URI provides them.",
-            color = Color(0xFF9E9E9E), fontSize = 12.sp,
-        )
+    SuiteScaffold(
+        title = stringResource(R.string.title_add),
+        onBack = onCancel,
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+        ) {
+            Text(
+                stringResource(R.string.add_intro),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
-        OutlinedButton(
-            onClick = {
-                Diagnostics.log("aegis.Add", "Pick QR screenshot: tap")
-                qrFeedback = null
-                AegisVaultManager.beginTransientFlight()
-                runCatching { qrPicker.launch("image/*") }
-                    .onFailure {
+            SecureOutlinedButton(
+                onClick = {
+                    Diagnostics.log("aegis.Add", "Pick QR screenshot: tap")
+                    qrFeedback = null
+                    AegisVaultManager.beginTransientFlight()
+                    runCatching { qrPicker.launch("image/*") }
+                        .onFailure {
+                            Diagnostics.error("aegis.Add",
+                                "qrPicker.launch threw: ${it.javaClass.simpleName}: ${it.message}")
+                            AegisVaultManager.endTransientFlight()
+                        }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.action_pick_qr))
+            }
+            SecureOutlinedButton(
+                onClick = {
+                    Diagnostics.log("aegis.Add", "Import from file: tap")
+                    qrFeedback = null
+                    AegisVaultManager.beginTransientFlight()
+                    runCatching {
+                        filePicker.launch(arrayOf(
+                            "text/plain",
+                            "application/json",
+                            "text/csv",
+                            "*/*",
+                        ))
+                    }.onFailure {
                         Diagnostics.error("aegis.Add",
-                            "qrPicker.launch threw: ${it.javaClass.simpleName}: ${it.message}")
+                            "filePicker.launch threw: ${it.javaClass.simpleName}: ${it.message}")
                         AegisVaultManager.endTransientFlight()
                     }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Pick QR screenshot from gallery")
-        }
-        OutlinedButton(
-            onClick = {
-                Diagnostics.log("aegis.Add", "Import from file: tap")
-                qrFeedback = null
-                AegisVaultManager.beginTransientFlight()
-                runCatching {
-                    filePicker.launch(arrayOf(
-                        "text/plain",
-                        "application/json",
-                        "text/csv",
-                        "*/*",
-                    ))
-                }.onFailure {
-                    Diagnostics.error("aegis.Add",
-                        "filePicker.launch threw: ${it.javaClass.simpleName}: ${it.message}")
-                    AegisVaultManager.endTransientFlight()
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Import from file (otpauth-migration / Proton)")
-        }
-        if (working) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                )
-                Spacer(Modifier.width(10.dp))
-                Text("Working…", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.action_import_file))
             }
-        }
-        qrFeedback?.let {
-            Text(
-                it,
-                color = if (it.startsWith("QR decoded")) Color(0xFF81C784) else Color(0xFFFFB74D),
-                fontSize = 12.sp,
-            )
-        }
-        OutlinedTextField(
-            value = issuer, onValueChange = { issuer = it },
-            label = { Text("Issuer (e.g. Google)") }, singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = account, onValueChange = { account = it },
-            label = { Text("Account (e.g. you@example.com)") }, singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        // Mask the secret / otpauth:// field by default (design §5.3 D-S3) — it
-        // holds the seed, and rendering it in plaintext after paste/QR decode is
-        // inconsistent with redacting 30s codes everywhere else. Eye toggle to
-        // reveal for verification.
-        OutlinedTextField(
-            value = secretInput, onValueChange = { secretInput = it },
-            label = { Text("Secret or otpauth:// URI") },
-            visualTransformation = if (secretRevealed) VisualTransformation.None
-            else PasswordVisualTransformation(),
-            trailingIcon = {
-                TextButton(onClick = { secretRevealed = !secretRevealed }) {
-                    Text(if (secretRevealed) "Hide" else "Show", fontSize = 12.sp)
-                }
-            },
-            modifier = Modifier.fillMaxWidth().height(120.dp),
-        )
-        error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-        Spacer(Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SecureButton(
-                onClick = {
-                    error = null
-                    val parsed = try {
-                        OtpAuthEntry.parse(secretInput.trim())
-                    } catch (t: Throwable) {
-                        error = "Couldn't parse: ${t.message ?: "invalid input"}"
-                        return@SecureButton
-                    }
-                    val finalIssuer = issuer.trim().ifEmpty { parsed.issuer }
-                    val finalAccount = account.trim().ifEmpty { parsed.account }
-                    if (parsed.secret.isEmpty()) {
-                        parsed.wipeSecret()
-                        error = "Secret is empty."
-                        return@SecureButton
-                    }
-                    val newEntry = AegisEntry.fromOtpAuth(parsed).copy(
-                        issuer = finalIssuer,
-                        account = finalAccount,
+            if (working) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
                     )
-                    parsed.wipeSecret()
-                    working = true
-                    scope.launch {
-                        val outcome = runCatching {
-                            vault.contents = vault.contents.copy(
-                                entries = vault.contents.entries + newEntry,
-                            )
-                            withContext(Bg.io) { vault.save() }
-                        }
-                        working = false
-                        outcome.fold(
-                            onSuccess = {
-                                // Drop the live secret String references (Strings
-                                // can't be wiped, but this frees them for GC).
-                                secretInput = ""
-                                issuer = ""
-                                account = ""
-                                onSaved()
-                            },
-                            onFailure = { error = "Save failed: ${it.message}" },
+                    Spacer(Modifier.width(UnderstoryTheme.spacing.md))
+                    Text(stringResource(R.string.state_working),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            qrFeedback?.let {
+                val decodedMsg = stringResource(R.string.msg_qr_decoded)
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (it == decodedMsg) UnderstoryTheme.semantic.success
+                    else UnderstoryTheme.semantic.warning,
+                )
+            }
+            OutlinedTextField(
+                value = issuer, onValueChange = { issuer = it },
+                label = { Text(stringResource(R.string.label_issuer)) }, singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = account, onValueChange = { account = it },
+                label = { Text(stringResource(R.string.label_account)) }, singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // Mask the secret / otpauth:// field by default (design §5.3 D-S3) — it
+            // holds the seed, and rendering it in plaintext after paste/QR decode is
+            // inconsistent with redacting codes everywhere else. Eye toggle to
+            // reveal for verification.
+            OutlinedTextField(
+                value = secretInput, onValueChange = { secretInput = it },
+                label = { Text(stringResource(R.string.label_secret)) },
+                visualTransformation = if (secretRevealed) VisualTransformation.None
+                else PasswordVisualTransformation(),
+                trailingIcon = {
+                    TextButton(onClick = { secretRevealed = !secretRevealed }) {
+                        Text(
+                            if (secretRevealed) stringResource(R.string.action_hide)
+                            else stringResource(R.string.action_show),
+                            style = MaterialTheme.typography.bodyMedium,
                         )
                     }
                 },
-                enabled = secretInput.isNotBlank() && !working,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-            ) {
-                Text("Save")
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+            )
+            error?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error)
             }
-            SecureOutlinedButton(onClick = {
-                // Same secret-reference-drop on Cancel.
-                secretInput = ""
-                issuer = ""
-                account = ""
-                onCancel()
-            }, modifier = Modifier.weight(1f).fillMaxWidth()) {
-                Text("Cancel")
+            Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
+                SecureButton(
+                    onClick = {
+                        error = null
+                        val parsed = try {
+                            OtpAuthEntry.parse(secretInput.trim())
+                        } catch (t: Throwable) {
+                            error = ctx.getString(R.string.err_parse_input, t.message ?: ctx.getString(R.string.err_parse_generic))
+                            return@SecureButton
+                        }
+                        val finalIssuer = issuer.trim().ifEmpty { parsed.issuer }
+                        val finalAccount = account.trim().ifEmpty { parsed.account }
+                        if (parsed.secret.isEmpty()) {
+                            parsed.wipeSecret()
+                            error = ctx.getString(R.string.err_secret_empty)
+                            return@SecureButton
+                        }
+                        val newEntry = AegisEntry.fromOtpAuth(parsed).copy(
+                            issuer = finalIssuer,
+                            account = finalAccount,
+                        )
+                        parsed.wipeSecret()
+                        working = true
+                        scope.launch {
+                            val outcome = runCatching {
+                                vault.contents = vault.contents.copy(
+                                    entries = vault.contents.entries + newEntry,
+                                )
+                                withContext(Bg.io) { vault.save() }
+                            }
+                            working = false
+                            outcome.fold(
+                                onSuccess = {
+                                    // Drop the live secret String references (Strings
+                                    // can't be wiped, but this frees them for GC).
+                                    secretInput = ""
+                                    issuer = ""
+                                    account = ""
+                                    onSaved()
+                                },
+                                onFailure = { error = ctx.getString(R.string.err_save_failed, it.message ?: "") },
+                            )
+                        }
+                    },
+                    enabled = secretInput.isNotBlank() && !working,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.action_save))
+                }
+                SecureOutlinedButton(onClick = {
+                    // Same secret-reference-drop on Cancel.
+                    secretInput = ""
+                    issuer = ""
+                    account = ""
+                    onCancel()
+                }, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             }
         }
     }
