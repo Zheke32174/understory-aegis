@@ -1,5 +1,8 @@
 package com.understory.aegis
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -9,42 +12,53 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.understory.backup.RecoveryFile
 import com.understory.security.Crypto
 import com.understory.security.SecureButton
 import com.understory.security.SecureOutlinedButton
-import com.understory.security.VaultExportScreen
+import com.understory.security.ui.Bg
+import com.understory.security.ui.messageForUser
 import com.understory.security.ui.theme.UnderstoryAccent
 import com.understory.security.ui.theme.UnderstoryTheme
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * aegis's Export flow (design §3.1 output #3 / §4).
+ * aegis's Export flow (design §3.1 / §4), reworked to the SELF-SEALING,
+ * FILE-BASED recovery model (operator directive 2026-07-03 — "the screen is the
+ * enemy").
  *
- * THREAT-MODEL INVARIANT (screen-emanation defense): the value that can
- * decrypt a backup is NEVER rendered on screen — not as text, not grouped
- * for transcription, not as a QR code. A camera or Van-Eck capture of the
- * display would otherwise leak the ultimate secret, which FLAG_SECURE does
- * not prevent. So instead of minting a random recovery key and revealing it,
- * the user SUPPLIES a recovery passphrase (masked entry, never displayed or
- * stored). That passphrase encrypts the `.usbe` and is what the user types
- * on restore. Losing it means the backup is useless (honest §4).
+ * THREAT-MODEL INVARIANT: the value that can decrypt a vault is NEVER rendered on
+ * screen — not as text, not grouped for transcription, not as a QR code — AND is
+ * NEVER typed by the user. The app self-manages a random recovery key `R` as an
+ * encrypted FILE:
  *
- * The plaintext-interop path ([onExportPlaintext]) offers the otpauth:// list
- * and Aegis-compatible JSON outputs (#1/#2).
+ *   - At vault creation the KEK is already sealed to an at-rest kit under a
+ *     non-auth wrap key (see [AegisVault.createV2] → [RecoveryFile.seal]), so a
+ *     biometric re-enrollment recovers SILENTLY with nothing on screen.
+ *   - "Export recovery file" here writes ONE opaque, self-contained recovery file
+ *     to a SAF location (USB, cloud). It carries `R` plus the `R`-encrypted KEK,
+ *     so it restores on a brand-new device. It is never displayed. Honest copy:
+ *     "keep this file safe; anyone who has it can open your vault."
  *
- * The passphrase CharArray handed to the export screen is owned here and wiped
- * on dispose.
+ * The old "set a recovery passphrase" masked entry and the base64/typed-key
+ * surfaces are gone: the operator does not type or read anything.
+ *
+ * The plaintext-interop path ([onExportPlaintext]) still offers the otpauth://
+ * list and Aegis-compatible JSON outputs (#1/#2).
  */
 @Composable
 fun AegisExportFlow(
@@ -53,112 +67,110 @@ fun AegisExportFlow(
     onDone: () -> Unit,
 ) {
     UnderstoryTheme(accent = UnderstoryAccent.AEGIS) {
-        var passphrase by remember { mutableStateOf("") }
-        var confirm by remember { mutableStateOf("") }
-        var committed by remember { mutableStateOf(false) }
+        val ctx = LocalContext.current
+        val scope = rememberCoroutineScope()
 
-        if (!committed) {
-            RecoveryPassphraseEntry(
-                passphrase = passphrase,
-                onPassphrase = { passphrase = it },
-                confirm = confirm,
-                onConfirm = { confirm = it },
-                onProceed = { committed = true },
-                onCancel = onDone,
+        var phaseName by rememberSaveable { mutableStateOf(Phase.IDLE.name) }
+        val phase = Phase.valueOf(phaseName)
+        var message by remember { mutableStateOf("") }
+
+        // SAF CreateDocument for the opaque recovery kit. The file is written by
+        // [RecoveryFile.exportKit], which mints a fresh `R`, embeds it with the
+        // `R`-encrypted KEK, and emits opaque bytes. Nothing here reads or shows
+        // the recovery secret.
+        val createKit = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream"),
+        ) { uri: Uri? ->
+            if (uri == null) {
+                phaseName = Phase.IDLE.name
+                return@rememberLauncherForActivityResult
+            }
+            phaseName = Phase.WRITING.name
+            scope.launch {
+                val outcome = runCatching {
+                    // KEK material is the same bytes the recovery-bundle path
+                    // used; owned here and wiped after the write.
+                    val kek = vault.kekMaterial()
+                    try {
+                        withContext(Bg.io) {
+                            ctx.contentResolver.openOutputStream(uri)?.use { out ->
+                                RecoveryFile.exportKit(ctx, out, kek)
+                            } ?: error("Could not open the chosen file for writing.")
+                        }
+                    } finally {
+                        Crypto.wipe(kek)
+                    }
+                }
+                outcome.fold(
+                    onSuccess = { phaseName = Phase.DONE.name; message = "Recovery file saved." },
+                    onFailure = { phaseName = Phase.ERROR.name; message = it.messageForUser() },
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
+        ) {
+            Text(
+                "Export recovery file",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
             )
-        } else {
-            // Hand the RAW passphrase chars to the shared encrypted-export
-            // screen (VaultImportScreen decrypts with the raw typed value, so
-            // encrypt must match — do NOT normalize here).
-            val keyChars = remember { passphrase.toCharArray() }
-            DisposableEffect(Unit) { onDispose { Crypto.wipe(keyChars) } }
-            VaultExportScreen(
-                port = AegisExportPort,
-                unlocked = vault,
-                recoveryKey = keyChars,
-                onDone = onDone,
-                onExportPlaintext = onExportPlaintext,
-            )
+            when (phase) {
+                Phase.IDLE -> {
+                    Text(
+                        "This saves one recovery file for your vault. Keep it somewhere " +
+                            "safe — anyone who has it can open your vault. Use it to restore " +
+                            "on a new phone or after a fingerprint/lock-screen change.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    SecureButton(
+                        onClick = { createKit.launch("aegis-recovery.ukit") },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Export recovery file") }
+                    SecureOutlinedButton(
+                        onClick = onExportPlaintext,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Export for another app (unencrypted)…") }
+                    SecureOutlinedButton(
+                        onClick = onDone,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Done") }
+                }
+                Phase.WRITING -> {
+                    Text("Writing…", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    CircularProgressIndicator()
+                }
+                Phase.DONE -> {
+                    Text(message, style = MaterialTheme.typography.bodyMedium,
+                        color = UnderstoryTheme.semantic.success)
+                    Spacer(Modifier.height(4.dp))
+                    SecureButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
+                        Text("Done")
+                    }
+                }
+                Phase.ERROR -> {
+                    Text(message, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(4.dp))
+                    SecureButton(
+                        onClick = { phaseName = Phase.IDLE.name },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Try again") }
+                    SecureOutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
+                        Text("Back")
+                    }
+                }
+            }
         }
     }
 }
 
-private const val MIN_PASSPHRASE_LEN = 8
-
-/**
- * Collect a recovery passphrase the user chooses. Both fields are masked;
- * nothing secret is ever rendered. The user is supplying their own secret
- * (the accepted password-entry pattern), not the app emanating a stored one.
- */
-@Composable
-private fun RecoveryPassphraseEntry(
-    passphrase: String,
-    onPassphrase: (String) -> Unit,
-    confirm: String,
-    onConfirm: (String) -> Unit,
-    onProceed: () -> Unit,
-    onCancel: () -> Unit,
-) {
-    val longEnough = passphrase.length >= MIN_PASSPHRASE_LEN
-    val matches = passphrase == confirm
-    val valid = longEnough && matches
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(UnderstoryTheme.spacing.lg),
-        verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
-    ) {
-        Text(
-            "Set a recovery passphrase",
-            style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Text(
-            "This passphrase encrypts your backup file. It is never shown on " +
-                "screen or stored anywhere — if you lose it, the backup cannot " +
-                "be opened. Choose something strong you'll remember, or keep it " +
-                "in your password manager.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = passphrase,
-            onValueChange = onPassphrase,
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            label = { Text("Recovery passphrase") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = confirm,
-            onValueChange = onConfirm,
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            label = { Text("Confirm passphrase") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        if (passphrase.isNotEmpty() && !longEnough) {
-            Text(
-                "Use at least $MIN_PASSPHRASE_LEN characters.",
-                style = MaterialTheme.typography.bodySmall,
-                color = UnderstoryTheme.semantic.warning,
-            )
-        } else if (confirm.isNotEmpty() && !matches) {
-            Text(
-                "The two entries don't match.",
-                style = MaterialTheme.typography.bodySmall,
-                color = UnderstoryTheme.semantic.warning,
-            )
-        }
-        Spacer(Modifier.height(4.dp))
-        SecureButton(
-            onClick = onProceed,
-            enabled = valid,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Continue to export") }
-        SecureOutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
-            Text("Cancel")
-        }
-    }
-}
+private enum class Phase { IDLE, WRITING, DONE, ERROR }

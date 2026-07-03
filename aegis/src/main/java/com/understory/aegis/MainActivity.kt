@@ -88,6 +88,7 @@ import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import android.content.Intent
+import com.understory.backup.RecoveryFile
 import com.understory.security.A11yProbe
 import com.understory.security.Crypto
 import com.understory.security.Diagnostics
@@ -100,7 +101,6 @@ import com.understory.security.SecureOutlinedButton
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
 import com.understory.security.secureClickable
-import com.understory.security.VaultImportScreen
 import com.understory.security.VaultRecovery
 import com.understory.security.ui.Bg
 import com.understory.security.ui.components.EmptyState
@@ -331,7 +331,7 @@ class MainActivity : FragmentActivity() {
     }
 }
 
-private enum class Stage { Setup, Unlock, Recovery, List, Add, Export, Import, Keyboard, Diagnostics }
+private enum class Stage { Setup, Unlock, Recovery, RestoreRecovery, List, Add, Export, Keyboard, Diagnostics }
 
 /**
  * The shared [SuiteStatusFooter] is a suite-wiring smoke test (tier / peer /
@@ -402,16 +402,63 @@ private fun AegisRoot(
         }
         Stage.Recovery -> {
             KeepAliveBackHandler("aegis.Root.Recovery")
-            // keyUsable=false here: the recovery screen is reached because the
-            // key was destroyed, so export-first is impossible; restore-from-
-            // backup or reset are the two honest paths.
+            // Self-sealing recovery (operator directive 2026-07-03). The key was
+            // destroyed by a biometric / lock-screen change. FIRST try a SILENT
+            // in-vault re-bind from the at-rest sealed kit — no user action,
+            // nothing on screen. Only if that kit is gone do we show the
+            // (typing-free) "Restore from your recovery file" landing.
+            var silentTried by rememberSaveable { mutableStateOf(false) }
+            LaunchedEffect(silentTried) {
+                if (silentTried) return@LaunchedEffect
+                silentTried = true
+                // readKekFromSealedKit returns null when the kit is absent or
+                // undecryptable; only proceed to the biometric rebind when we
+                // actually recovered the KEK. On any failure we fall through to
+                // the (typing-free) "Restore from your recovery file" landing
+                // already rendered below.
+                val kek = withContext(Bg.io) { RecoveryFile.readKekFromSealedKit(ctx) }
+                if (kek != null) {
+                    rebindVaultFromKek(
+                        activity = activity,
+                        ctx = ctx,
+                        recoveredKek = kek, // ownership transferred; wiped inside
+                        onRebound = { v ->
+                            setUnlocked(v)
+                            setStage(if (pendingImport != null) Stage.Add else Stage.List)
+                        },
+                        onError = { msg -> Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show() },
+                    )
+                }
+            }
             RecoveryScreen(
                 onReset = {
                     setUnlocked(null)
                     setStage(Stage.Setup)
                 },
-                onRestore = { setStage(Stage.Import) },
+                onRestoreFromFile = { setStage(Stage.RestoreRecovery) },
                 onClose = onClose,
+            )
+        }
+        Stage.RestoreRecovery -> {
+            KeepAliveBackHandler("aegis.Root.RestoreRecovery")
+            RestoreFromRecoveryFileScreen(
+                onKekRecovered = { kek ->
+                    // The file yielded the KEK (the user typed nothing). Rebind
+                    // the vault under a fresh device key behind a biometric prompt.
+                    rebindVaultFromKek(
+                        activity = activity,
+                        ctx = ctx,
+                        recoveredKek = kek, // ownership transferred; wiped inside
+                        onRebound = { v ->
+                            setUnlocked(v)
+                            setStage(if (pendingImport != null) Stage.Add else Stage.List)
+                        },
+                        onError = { msg ->
+                            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                        },
+                    )
+                },
+                onBack = { setStage(if (unlockedRef() != null) Stage.List else Stage.Recovery) },
             )
         }
         Stage.List -> {
@@ -421,7 +468,7 @@ private fun AegisRoot(
                 vault = v,
                 onAdd = { setStage(Stage.Add) },
                 onExport = { setStage(Stage.Export) },
-                onImport = { setStage(Stage.Import) },
+                onImport = { setStage(Stage.RestoreRecovery) },
                 onKeyboard = { setStage(Stage.Keyboard) },
                 onLock = {
                     v.lock()
@@ -455,31 +502,6 @@ private fun AegisRoot(
                 AegisExportFlow(
                     vault = v,
                     onExportPlaintext = { plaintext = true },
-                    onDone = backToList,
-                )
-            }
-        }
-        Stage.Import -> {
-            // Reached from Recovery (restore-from-backup). The shared import
-            // screen decrypts a .usbe under the user's recovery key. Needs an
-            // unlocked vault to merge into: if the key was invalidated we must
-            // reset first, so Import from Recovery routes through a fresh Setup.
-            val v = unlockedRef()
-            BackHandler {
-                setStage(if (v != null) Stage.List else Stage.Recovery)
-            }
-            if (v == null) {
-                // No unlockable vault (post-invalidation). Instruct: reset first.
-                RestoreNeedsResetScreen(
-                    onReset = {
-                        setUnlocked(null)
-                        setStage(Stage.Setup)
-                    },
-                    onBack = { setStage(Stage.Recovery) },
-                )
-            } else {
-                VaultImportScreen(
-                    port = AegisExportPort,
                     onDone = backToList,
                 )
             }
@@ -734,6 +756,69 @@ private fun promptAuth(
         )
         .build()
     prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+}
+
+/**
+ * Rebuild the vault from recovered KEK material (self-sealing recovery, operator
+ * directive 2026-07-03). Shared by the SILENT in-vault re-bind (KEK from the
+ * at-rest sealed kit) and the "Restore from your recovery file" path (KEK from
+ * the imported `.ukit`). The user typed nothing to get here.
+ *
+ * The old device-auth key was destroyed by the biometric / lock-screen change,
+ * so we drop the stale alias and mint a FRESH one behind a BiometricPrompt, then
+ * re-wrap the same KEK under it via [AegisVault.rebindWithKek] (or, on a device
+ * with no vault file yet, [AegisVault.createWithKek]).
+ *
+ * [recoveredKek] ownership is TRANSFERRED to this function: it is wiped here
+ * regardless of outcome.
+ */
+private fun rebindVaultFromKek(
+    activity: FragmentActivity,
+    ctx: Context,
+    recoveredKek: ByteArray,
+    onRebound: (UnlockedAegisVault) -> Unit,
+    onError: (String) -> Unit,
+) {
+    runCatching {
+        // Drop the stale (invalidated) device-auth key so a fresh, usable one is
+        // minted; without this the Keystore hands back the destroyed key and
+        // doFinal throws.
+        Crypto.deleteDeviceAuthKey()
+        val cipher = Crypto.deviceAuthCipherForEncrypt()
+        promptAuth(
+            activity,
+            "Re-bind Understory OTP vault to this device",
+            cipher,
+            onSuccess = { authed ->
+                val outcome = runCatching {
+                    if (AegisVault.exists(ctx)) {
+                        AegisVault.rebindWithKek(ctx, recoveredKek, authed)
+                    } else {
+                        AegisVault.createWithKek(ctx, recoveredKek, authed)
+                    }
+                }
+                Crypto.wipe(recoveredKek)
+                outcome.fold(
+                    onSuccess = { v ->
+                        if (activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                            onRebound(v)
+                        } else {
+                            v.lock()
+                        }
+                    },
+                    onFailure = { onError(ctx.getString(R.string.err_vault_decrypt)) },
+                )
+            },
+            onError = { msg ->
+                Crypto.wipe(recoveredKek)
+                onError(ctx.getString(R.string.err_auth_failed, msg))
+            },
+            onCancel = { Crypto.wipe(recoveredKek) },
+        )
+    }.onFailure {
+        Crypto.wipe(recoveredKek)
+        onError(ctx.getString(R.string.err_crypto_init, it.message ?: ""))
+    }
 }
 
 /** Top-level sections of the authenticator, surfaced as a Material3 NavigationBar. */

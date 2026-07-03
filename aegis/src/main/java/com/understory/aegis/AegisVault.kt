@@ -2,6 +2,8 @@ package com.understory.aegis
 
 import android.annotation.SuppressLint
 import android.content.Context
+import com.understory.backup.RecoveryFile
+import com.understory.backup.RecoveryWrapKey
 import com.understory.security.Crypto
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,6 +70,12 @@ object AegisVault {
     fun delete(ctx: Context) {
         File(ctx.filesDir, FILE).delete()
         Crypto.deleteDeviceAuthKey()
+        // Self-sealing recovery (design §4, operator directive 2026-07-03): a
+        // full wipe must also drop the in-vault sealed recovery kit and its
+        // non-auth wrap key, or a reset would leave a kit that unwraps to the
+        // KEK of a vault that no longer exists.
+        runCatching { File(ctx.filesDir, RecoveryFile.KIT_FILE).delete() }
+        RecoveryWrapKey.deleteKey()
     }
 
     /** Read the IV needed to construct the unlock cipher. */
@@ -101,6 +109,15 @@ object AegisVault {
 
             writeFile(ctx, wrappedKekIv, wrappedKekCt, contentCt)
 
+            // SELF-SEAL (operator directive 2026-07-03 — "the screen is the
+            // enemy"). Mint a random recovery key and seal the vault's KEK to an
+            // encrypted at-rest kit under the non-auth [RecoveryWrapKey]. Nothing
+            // is prompted and nothing is shown; the user never sees or types the
+            // recovery key. Because the wrap key survives biometric re-enrollment,
+            // a fingerprint / lock-screen change can later be recovered SILENTLY
+            // from this kit ([RecoveryFile.readKekFromSealedKit]).
+            RecoveryFile.seal(ctx, APP_ID, masterKek)
+
             return UnlockedAegisVault(
                 ctx = ctx,
                 wrappedKekIv = wrappedKekIv,
@@ -110,6 +127,100 @@ object AegisVault {
             )
         } finally {
             Crypto.wipe(masterKek)
+        }
+    }
+
+    /** App id recorded in the sealed recovery kit; matches the package id. */
+    private const val APP_ID = "com.understory.aegis"
+
+    /**
+     * Rebuild the vault from recovered KEK material after the device-auth key was
+     * destroyed (biometric / lock-screen change) or when restoring on a fresh
+     * device from an exported recovery file. The caller has authenticated via
+     * BiometricPrompt and supplies an encrypt-mode Cipher initialised with a FRESH
+     * device-auth Keystore key; [recoveredKek] is the vault's original KEK, which
+     * still decrypts the on-disk content ciphertext.
+     *
+     * This re-wraps the SAME KEK under the new device-auth key and rewrites the
+     * header, so all existing entries stay readable — the content ciphertext is
+     * left untouched and only the wrapped-KEK header is replaced. The at-rest
+     * recovery kit is re-sealed with a fresh recovery key so it tracks the new
+     * bind. [recoveredKek] is COPIED internally; the caller still owns and must
+     * wipe its own array.
+     */
+    fun rebindWithKek(
+        ctx: Context,
+        recoveredKek: ByteArray,
+        deviceAuthEncryptCipher: javax.crypto.Cipher,
+    ): UnlockedAegisVault {
+        sweepTmp(ctx)
+        require(recoveredKek.size == MASTER_KEK_BYTES) { "unexpected KEK size" }
+        val kek = recoveredKek.copyOf()
+        try {
+            // Read the existing content ciphertext (still encrypted under this
+            // KEK) and confirm the KEK actually decrypts it before we overwrite
+            // the header — a wrong file would otherwise brick the vault.
+            val existingContentCt = readFile(ctx).second
+            val pt = Crypto.aesGcmDecrypt(kek, existingContentCt)
+            val contents = parse(String(pt, Charsets.UTF_8))
+            Crypto.wipe(pt)
+
+            val wrappedKekCt = deviceAuthEncryptCipher.doFinal(kek)
+            val wrappedKekIv = deviceAuthEncryptCipher.iv
+            writeFile(ctx, wrappedKekIv, wrappedKekCt, existingContentCt)
+
+            // Re-seal the at-rest kit so it tracks the newly-bound vault.
+            RecoveryFile.reseal(ctx, APP_ID, kek)
+
+            return UnlockedAegisVault(
+                ctx = ctx,
+                wrappedKekIv = wrappedKekIv,
+                wrappedKekCt = wrappedKekCt,
+                kek = kek.copyOf(),
+                contents = contents,
+            )
+        } finally {
+            Crypto.wipe(kek)
+        }
+    }
+
+    /**
+     * First-time creation on a fresh device from an imported recovery file, when
+     * NO vault file exists yet. Builds a brand-new vault whose KEK is the imported
+     * [recoveredKek] (so a later export/kit stays consistent) and whose contents
+     * start empty — the caller then merges the restored entries via the normal
+     * import path, or the exported file carried only the KEK. Mirrors [createV2]
+     * but adopts the supplied KEK instead of minting one.
+     */
+    fun createWithKek(
+        ctx: Context,
+        recoveredKek: ByteArray,
+        deviceAuthEncryptCipher: javax.crypto.Cipher,
+    ): UnlockedAegisVault {
+        sweepTmp(ctx)
+        require(recoveredKek.size == MASTER_KEK_BYTES) { "unexpected KEK size" }
+        val kek = recoveredKek.copyOf()
+        try {
+            val wrappedKekCt = deviceAuthEncryptCipher.doFinal(kek)
+            val wrappedKekIv = deviceAuthEncryptCipher.iv
+
+            val contents = AegisVaultContents(entries = emptyList())
+            val plaintext = serialize(contents).toByteArray(Charsets.UTF_8)
+            val contentCt = Crypto.aesGcmEncrypt(kek, plaintext)
+            Crypto.wipe(plaintext)
+
+            writeFile(ctx, wrappedKekIv, wrappedKekCt, contentCt)
+            RecoveryFile.reseal(ctx, APP_ID, kek)
+
+            return UnlockedAegisVault(
+                ctx = ctx,
+                wrappedKekIv = wrappedKekIv,
+                wrappedKekCt = wrappedKekCt,
+                kek = kek.copyOf(),
+                contents = contents,
+            )
+        } finally {
+            Crypto.wipe(kek)
         }
     }
 
@@ -296,6 +407,15 @@ class UnlockedAegisVault internal constructor(
         Crypto.wipe(plaintext)
         AegisVault.writeFile(ctx, wrappedKekIv, wrappedKekCt, ct)
     }
+
+    /**
+     * A COPY of the vault's master KEK, for the self-sealing recovery file
+     * ([RecoveryFile.exportKit] / [RecoveryFile.seal]). The recovery kit protects
+     * the KEK material — the same bytes the old recovery-bundle path used — so an
+     * exported file can rebuild the vault. The returned array is the CALLER's to
+     * use and wipe; the vault keeps its own live buffer.
+     */
+    internal fun kekMaterial(): ByteArray = kek.copyOf()
 
     fun lock() {
         Crypto.wipe(kek)
