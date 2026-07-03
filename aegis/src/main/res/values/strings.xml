@@ -49,9 +49,30 @@
     <string name="action_restore">Restore</string>
     <string name="action_keyboard">Keyboard</string>
     <string name="action_diagnostics">Diagnostics</string>
-    <string name="empty_no_entries_title">No entries yet</string>
-    <string name="empty_no_entries_body">Tap \"Add entry\" to add a code, or Restore to import a backup.</string>
+    <string name="empty_no_entries_title">No codes yet</string>
+    <string name="empty_no_entries_body">Add your first account: tap the + button to scan a QR code from your gallery or paste an otpauth:// link.</string>
     <string name="no_issuer">(no issuer)</string>
+
+    <!-- ==== Bottom navigation + chrome ==== -->
+    <string name="nav_codes">Codes</string>
+    <string name="nav_settings">Settings</string>
+    <string name="cd_add_entry">Add a new account</string>
+    <string name="tap_to_copy_hint">Tap a code to copy it. It never appears on screen.</string>
+    <string name="on_device_note">Codes are generated on this device. Nothing syncs to a server.</string>
+
+    <!-- ==== Settings tab ==== -->
+    <string name="settings_section_backup">Backup &amp; restore</string>
+    <string name="settings_section_input">Code entry</string>
+    <string name="settings_section_about">About</string>
+    <string name="settings_export_title">Export a backup</string>
+    <string name="settings_export_supporting">Save an encrypted copy so a lost phone or a biometric change doesn\'t lose your codes.</string>
+    <string name="settings_restore_title">Restore from a backup</string>
+    <string name="settings_restore_supporting">Import an Understory, Aegis, Proton, or Google Authenticator export.</string>
+    <string name="settings_keyboard_title">Understory OTP keyboard</string>
+    <string name="settings_keyboard_supporting">Type codes straight into apps without the clipboard.</string>
+    <string name="settings_about_title">On-device authenticator</string>
+    <string name="settings_about_supporting">Seeds are encrypted on this device and unlocked with your device biometric or PIN. Codes are never shown to a server and never rendered as text on screen.</string>
+    <string name="settings_diagnostics_supporting">Engineering build only — live event log for troubleshooting.</string>
 
     <!-- Copy-window honesty (CD-4e): the clipboard auto-clear is a best-effort
          timer that does NOT survive the app process being killed, so the copy

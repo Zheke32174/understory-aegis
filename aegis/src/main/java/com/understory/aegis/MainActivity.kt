@@ -14,10 +14,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,13 +31,36 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +82,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
@@ -73,13 +99,16 @@ import com.understory.security.SecureButton
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
+import com.understory.security.secureClickable
 import com.understory.security.VaultImportScreen
 import com.understory.security.VaultRecovery
 import com.understory.security.ui.Bg
 import com.understory.security.ui.components.EmptyState
 import com.understory.security.ui.components.FatalScreen
 import com.understory.security.ui.components.SuiteCard
+import com.understory.security.ui.components.SuiteListRow
 import com.understory.security.ui.components.SuiteScaffold
+import com.understory.security.ui.components.SuiteSectionHeader
 import com.understory.security.ui.theme.UnderstoryAccent
 import com.understory.security.ui.theme.UnderstoryTheme
 import kotlinx.coroutines.delay
@@ -304,6 +333,16 @@ class MainActivity : FragmentActivity() {
 
 private enum class Stage { Setup, Unlock, Recovery, List, Add, Export, Import, Keyboard, Diagnostics }
 
+/**
+ * The shared [SuiteStatusFooter] is a suite-wiring smoke test (tier / peer /
+ * capability status) — genuinely useful in engineering builds, but it reads as a
+ * dev/debug status strip in a shipping authenticator. Gate it to the eng flavor
+ * so the prod chrome shows a clean shipping face with no status dump. The main
+ * (List) screen already uses a custom bottom bar (the NavigationBar), so this
+ * only affects the auxiliary SuiteScaffold screens (setup / unlock / add).
+ */
+private val SHOW_SUITE_FOOTER: Boolean = BuildConfig.FLAVOR == "eng"
+
 @Composable
 private fun AegisRoot(
     activity: FragmentActivity,
@@ -486,7 +525,10 @@ private fun SetupScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val deviceIssue = remember { deviceUnsupportedReason(ctx) }
 
-    SuiteScaffold(title = stringResource(R.string.title_setup)) { pad ->
+    SuiteScaffold(
+        title = stringResource(R.string.title_setup),
+        showSuiteFooter = SHOW_SUITE_FOOTER,
+    ) { pad ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -580,7 +622,10 @@ private fun UnlockScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
 
-    SuiteScaffold(title = stringResource(R.string.title_unlock)) { pad ->
+    SuiteScaffold(
+        title = stringResource(R.string.title_unlock),
+        showSuiteFooter = SHOW_SUITE_FOOTER,
+    ) { pad ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -691,6 +736,10 @@ private fun promptAuth(
     prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
 }
 
+/** Top-level sections of the authenticator, surfaced as a Material3 NavigationBar. */
+private enum class ListTab { Codes, Settings }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ListScreen(
     vault: UnlockedAegisVault,
@@ -729,121 +778,113 @@ private fun ListScreen(
     // the unlocked vault and Compose otherwise won't observe the swap.
     var revision by remember { mutableStateOf(0) }
 
-    SuiteScaffold(
-        title = stringResource(R.string.app_name),
-        actions = {
-            TextButton(onClick = onLock) { Text(stringResource(R.string.action_lock)) }
-        },
-    ) { pad ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(pad)
-                .padding(UnderstoryTheme.spacing.lg),
-            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
-        ) {
-            Text(
-                stringResource(R.string.entries_count, vault.contents.entries.size),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    var tab by rememberSaveable { mutableStateOf(ListTab.Codes.name) }
+    val currentTab = ListTab.valueOf(tab)
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
+                actions = {
+                    IconButtonSecure(
+                        onClick = onLock,
+                        icon = Icons.Filled.Lock,
+                        contentDescription = stringResource(R.string.action_lock),
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurface,
+                ),
             )
-            if (a11yState.activeServiceCount > 0) {
-                SuiteCard {
-                    Text(
-                        stringResource(R.string.a11y_warning, a11yState.activeServiceCount),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = UnderstoryTheme.semantic.warning,
-                    )
-                }
-                SecureOutlinedButton(
-                    onClick = { A11yProbe.openA11ySettings(ctx) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.action_review_a11y))
-                }
-            }
-            // Export-first nudge: shown until dismissed. Ties recovery to §3 export.
-            if (!nudgeDismissed && vault.contents.entries.isNotEmpty()) {
-                SuiteCard {
-                    Text(
-                        stringResource(R.string.nudge_export),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
-                    SecureButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_export)) }
-                    SecureOutlinedButton(onClick = { nudgeDismissed = true }, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_later)) }
-                }
-            }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
-                SecureButton(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_add_entry)) }
-                SecureOutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_export)) }
-            }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
-                SecureOutlinedButton(onClick = onImport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_restore)) }
-                SecureOutlinedButton(onClick = onKeyboard, modifier = Modifier.weight(1f).fillMaxWidth()) { Text(stringResource(R.string.action_keyboard)) }
-            }
-            if (vault.contents.entries.isEmpty()) {
-                EmptyState(
-                    title = stringResource(R.string.empty_no_entries_title),
-                    body = stringResource(R.string.empty_no_entries_body),
-                    modifier = Modifier.weight(1f),
+        },
+        floatingActionButton = {
+            // Primary create action — an add FAB, only where it belongs (Codes tab).
+            if (currentTab == ListTab.Codes) {
+                ExtendedFloatingActionButton(
+                    onClick = onAdd,
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = { Text(stringResource(R.string.action_add_entry)) },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
                 )
-            } else {
-                // revision is read so Compose treats the LazyColumn as dirty
-                // after a delete swap.
-                @Suppress("UNUSED_EXPRESSION") revision
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.xs),
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                ) {
-                    items(vault.contents.entries, key = { it.id }) { entry ->
-                        if (entry.type == OtpAuthEntry.Type.HOTP) {
-                            HotpRow(
-                                entry = entry,
-                                onGenerate = {
-                                    runCatching {
-                                        // Advance + persist BEFORE copying; propagate
-                                        // on save failure (no code served on desync).
-                                        val code = AegisCode.advanceHotp(vault, entry)
-                                        // HOTP codes don't expire on a clock; best-effort
-                                        // 60s clipboard clear, advertised honestly.
-                                        copyCodeToClipboard(ctx, code, windowSeconds = 60)
-                                        revision++
-                                        val newCounter = entry.counter + 1
-                                        Toast.makeText(
-                                            ctx,
-                                            ctx.getString(R.string.msg_code_copied_hotp, newCounter),
-                                            Toast.LENGTH_SHORT,
-                                        ).show()
-                                    }.onFailure {
-                                        Toast.makeText(ctx, ctx.getString(R.string.err_generate_failed, it.message ?: ""), Toast.LENGTH_LONG).show()
-                                    }
-                                },
-                                onLongPress = { deleteCandidate = entry },
-                            )
-                        } else {
-                            EntryRow(
-                                entry = entry,
-                                nowSeconds = tickSeconds,
-                                onTap = { code ->
-                                    // Copy window = the entry's real period, and the
-                                    // toast reads the SAME number (one source of truth,
-                                    // design §5.4). Best-effort clear at the period.
-                                    copyCodeToClipboard(ctx, code, windowSeconds = entry.period)
-                                    Toast.makeText(ctx, ctx.getString(R.string.msg_code_copied_totp, entry.period),
-                                        Toast.LENGTH_SHORT).show()
-                                },
-                                onLongPress = { deleteCandidate = entry },
-                            )
-                        }
+            }
+        },
+        bottomBar = {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                NavigationBarItem(
+                    selected = currentTab == ListTab.Codes,
+                    onClick = { tab = ListTab.Codes.name },
+                    icon = { Icon(Icons.Filled.Shield, contentDescription = null) },
+                    label = { Text(stringResource(R.string.nav_codes)) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
+                )
+                NavigationBarItem(
+                    selected = currentTab == ListTab.Settings,
+                    onClick = { tab = ListTab.Settings.name },
+                    icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                    label = { Text(stringResource(R.string.nav_settings)) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
+                )
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { pad ->
+        when (currentTab) {
+            ListTab.Codes -> CodesTab(
+                vault = vault,
+                pad = pad,
+                tickSeconds = tickSeconds,
+                a11yState = a11yState,
+                nudgeDismissed = nudgeDismissed,
+                onDismissNudge = { nudgeDismissed = true },
+                onExport = onExport,
+                revision = revision,
+                onReviewA11y = { A11yProbe.openA11ySettings(ctx) },
+                onCopyTotp = { entry, code ->
+                    // Copy window = the entry's real period, and the toast reads the
+                    // SAME number (one source of truth, design §5.4).
+                    copyCodeToClipboard(ctx, code, windowSeconds = entry.period)
+                    Toast.makeText(ctx, ctx.getString(R.string.msg_code_copied_totp, entry.period),
+                        Toast.LENGTH_SHORT).show()
+                },
+                onGenerateHotp = { entry ->
+                    runCatching {
+                        // Advance + persist BEFORE copying; propagate on save failure
+                        // (no code served on desync).
+                        val code = AegisCode.advanceHotp(vault, entry)
+                        copyCodeToClipboard(ctx, code, windowSeconds = 60)
+                        revision++
+                        Toast.makeText(
+                            ctx,
+                            ctx.getString(R.string.msg_code_copied_hotp, entry.counter + 1),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }.onFailure {
+                        Toast.makeText(ctx, ctx.getString(R.string.err_generate_failed, it.message ?: ""), Toast.LENGTH_LONG).show()
                     }
-                }
-            }
-            SecureOutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.action_diagnostics))
-            }
+                },
+                onLongPressEntry = { deleteCandidate = it },
+            )
+            ListTab.Settings -> SettingsTab(
+                pad = pad,
+                onExport = onExport,
+                onImport = onImport,
+                onKeyboard = onKeyboard,
+                onDiagnostics = onDiagnostics,
+            )
         }
     }
 
@@ -913,6 +954,243 @@ private fun ListScreen(
     }
 }
 
+/**
+ * The "Codes" tab: the scrollable authenticator list. Header line with the count
+ * and an on-device security note (the honest, user-facing replacement for the
+ * old dev status strip), any active warnings (a11y / export-first nudge), then a
+ * card per account. Every code stays redacted; tap copies. A trailing spacer
+ * keeps the last row clear of the FAB.
+ */
+@Composable
+private fun CodesTab(
+    vault: UnlockedAegisVault,
+    pad: androidx.compose.foundation.layout.PaddingValues,
+    tickSeconds: Long,
+    a11yState: A11yProbe.State,
+    nudgeDismissed: Boolean,
+    onDismissNudge: () -> Unit,
+    onExport: () -> Unit,
+    revision: Int,
+    onReviewA11y: () -> Unit,
+    onCopyTotp: (AegisEntry, String) -> Unit,
+    onGenerateHotp: (AegisEntry) -> Unit,
+    onLongPressEntry: (AegisEntry) -> Unit,
+) {
+    val entries = vault.contents.entries
+    if (entries.isEmpty()) {
+        Column(modifier = Modifier.fillMaxSize().padding(pad)) {
+            EmptyState(
+                title = stringResource(R.string.empty_no_entries_title),
+                body = stringResource(R.string.empty_no_entries_body),
+                icon = Icons.Filled.Shield,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        return
+    }
+
+    // revision is read so Compose treats the LazyColumn as dirty after a delete.
+    @Suppress("UNUSED_EXPRESSION") revision
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(pad),
+        contentPadding = PaddingValues(
+            start = UnderstoryTheme.spacing.lg,
+            end = UnderstoryTheme.spacing.lg,
+            top = UnderstoryTheme.spacing.md,
+            // Room so the FAB never overlaps the last card.
+            bottom = UnderstoryTheme.spacing.xxl + 56.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+    ) {
+        item(key = "__header") {
+            Column(verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.xs)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Outlined.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(UnderstoryTheme.spacing.sm))
+                    Text(
+                        stringResource(R.string.on_device_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    stringResource(R.string.entries_count, entries.size),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        if (a11yState.activeServiceCount > 0) {
+            item(key = "__a11y") {
+                WarningCard(
+                    text = stringResource(R.string.a11y_warning, a11yState.activeServiceCount),
+                    actionLabel = stringResource(R.string.action_review_a11y),
+                    onAction = onReviewA11y,
+                )
+            }
+        }
+
+        // Export-first nudge: shown until dismissed. Ties recovery to §3 export.
+        if (!nudgeDismissed) {
+            item(key = "__nudge") {
+                SuiteCard {
+                    Text(
+                        stringResource(R.string.nudge_export),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+                    ) {
+                        SecureButton(onClick = onExport, modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.action_export))
+                        }
+                        SecureOutlinedButton(onClick = onDismissNudge, modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.action_later))
+                        }
+                    }
+                }
+            }
+        }
+
+        items(entries, key = { it.id }) { entry ->
+            if (entry.type == OtpAuthEntry.Type.HOTP) {
+                HotpRow(
+                    entry = entry,
+                    onGenerate = { onGenerateHotp(entry) },
+                    onLongPress = { onLongPressEntry(entry) },
+                )
+            } else {
+                EntryRow(
+                    entry = entry,
+                    nowSeconds = tickSeconds,
+                    onTap = { code -> onCopyTotp(entry, code) },
+                    onLongPress = { onLongPressEntry(entry) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The "Settings" tab: backup / restore / keyboard grouped under section headers
+ * as tappable list rows with leading icons and supporting copy. The Diagnostics
+ * row is ENG-ONLY — [BuildConfig.FLAVOR] gates it so the shipping (prod) build
+ * exposes no diagnostics affordance at all.
+ */
+@Composable
+private fun SettingsTab(
+    pad: androidx.compose.foundation.layout.PaddingValues,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onKeyboard: () -> Unit,
+    onDiagnostics: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(pad)
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = UnderstoryTheme.spacing.xl),
+    ) {
+        SuiteSectionHeader(stringResource(R.string.settings_section_backup))
+        SuiteListRow(
+            headline = stringResource(R.string.settings_export_title),
+            supporting = stringResource(R.string.settings_export_supporting),
+            leading = { SettingsLeadingIcon(Icons.Outlined.CloudUpload) },
+            onClick = onExport,
+        )
+        SuiteListRow(
+            headline = stringResource(R.string.settings_restore_title),
+            supporting = stringResource(R.string.settings_restore_supporting),
+            leading = { SettingsLeadingIcon(Icons.Outlined.CloudDownload) },
+            onClick = onImport,
+        )
+
+        SuiteSectionHeader(stringResource(R.string.settings_section_input))
+        SuiteListRow(
+            headline = stringResource(R.string.settings_keyboard_title),
+            supporting = stringResource(R.string.settings_keyboard_supporting),
+            leading = { SettingsLeadingIcon(Icons.Filled.Keyboard) },
+            onClick = onKeyboard,
+        )
+
+        SuiteSectionHeader(stringResource(R.string.settings_section_about))
+        SuiteListRow(
+            headline = stringResource(R.string.settings_about_title),
+            supporting = stringResource(R.string.settings_about_supporting),
+            leading = { SettingsLeadingIcon(Icons.Outlined.Info) },
+        )
+
+        // ENG-ONLY: the in-app Diagnostics event log. Gated on the product
+        // flavor so prod builds ship with zero diagnostics entry point. The
+        // DiagnosticsScreen code stays reachable in the eng flavor.
+        if (BuildConfig.FLAVOR == "eng") {
+            SuiteListRow(
+                headline = stringResource(R.string.action_diagnostics),
+                supporting = stringResource(R.string.settings_diagnostics_supporting),
+                leading = { SettingsLeadingIcon(Icons.Filled.Key) },
+                onClick = onDiagnostics,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsLeadingIcon(icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Icon(
+        imageVector = icon,
+        contentDescription = null, // headline carries the meaning
+        tint = MaterialTheme.colorScheme.primary,
+    )
+}
+
+/** A warning-tinted card with a message and an inline review action. */
+@Composable
+private fun WarningCard(text: String, actionLabel: String, onAction: () -> Unit) {
+    SuiteCard {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = UnderstoryTheme.semantic.warning,
+        )
+        Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+        SecureOutlinedButton(onClick = onAction, modifier = Modifier.fillMaxWidth()) {
+            Text(actionLabel)
+        }
+    }
+}
+
+/** Top-bar icon action with the suite's tap-jacking-hardened click filter. */
+@Composable
+private fun IconButtonSecure(
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .secureClickable(onClick)
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null, // Box carries the description
+            tint = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun EntryRow(
@@ -934,7 +1212,7 @@ private fun EntryRow(
 
     // Threat model: "screen is never secure even when device is" — codes are
     // NEVER rendered to screen. Tap copies the current code to the clipboard;
-    // the row display stays redacted.
+    // the row display stays redacted (large grouped bullets, not the digits).
     SuiteCard(onClick = null) {
         Row(
             modifier = Modifier
@@ -946,38 +1224,79 @@ private fun EntryRow(
                 .semantics(mergeDescendants = true) { contentDescription = rowDesc },
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            IssuerAvatar(issuer = entry.issuer)
+            Spacer(Modifier.width(UnderstoryTheme.spacing.md))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     issuerText,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
                 if (entry.account.isNotEmpty()) {
                     Text(
                         entry.account,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(UnderstoryTheme.spacing.xs))
+                // Large, grouped, easy-to-read redacted code display. The bullets
+                // are spaced exactly like a real code of this digit-count would be,
+                // so the row is stable and the actual digits never reach the tree.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = AegisCode.bullets(entry.digits),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        letterSpacing = 2.sp,
+                        modifier = Modifier.clearAndSetSemantics {},
+                    )
+                    Spacer(Modifier.width(UnderstoryTheme.spacing.sm))
+                    Icon(
+                        imageVector = Icons.Filled.ContentCopy,
+                        contentDescription = null, // row description covers the copy action
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
                     )
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Bullets sized to the entry's digit count (6/7/8), so the row
-                // layout is stable and the real code never reaches the tree.
-                // Clear semantics: TalkBack announces the merged row description
-                // above, not the bullet glyphs.
-                Text(
-                    text = AegisCode.bullets(entry.digits),
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.clearAndSetSemantics {},
-                )
-                Spacer(Modifier.width(UnderstoryTheme.spacing.md))
-                CountdownRing(
-                    secondsLeft = secondsLeft,
-                    period = entry.period,
-                )
-            }
+            Spacer(Modifier.width(UnderstoryTheme.spacing.md))
+            CountdownRing(
+                secondsLeft = secondsLeft,
+                period = entry.period,
+            )
         }
+    }
+}
+
+/**
+ * Circular issuer monogram: the issuer's first letter on a tonal disc. Purely
+ * decorative — the row's merged content description names the issuer for
+ * TalkBack, so this Box clears its own semantics.
+ */
+@Composable
+private fun IssuerAvatar(issuer: String) {
+    val letter = issuer.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "•"
+    // Tonal disc from the app accent (theme primary) — keeps every badge inside
+    // the dim/desaturated suite palette rather than inventing per-issuer hues.
+    val base = MaterialTheme.colorScheme.primary
+    val container = base.copy(alpha = 0.18f)
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .background(container, CircleShape)
+            .clearAndSetSemantics {},
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = letter,
+            style = MaterialTheme.typography.titleMedium,
+            color = base,
+        )
     }
 }
 
@@ -1006,6 +1325,8 @@ private fun HotpRow(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            IssuerAvatar(issuer = entry.issuer)
+            Spacer(Modifier.width(UnderstoryTheme.spacing.md))
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -1017,20 +1338,31 @@ private fun HotpRow(
             ) {
                 Text(
                     issuerText,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
                 Text(
                     stringResource(R.string.hotp_meta, accountPrefix, entry.counter),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
             }
+            Spacer(Modifier.width(UnderstoryTheme.spacing.sm))
             val genCd = stringResource(R.string.cd_generate_next)
             SecureButton(
                 onClick = onGenerate,
                 modifier = Modifier.semantics { contentDescription = genCd },
             ) {
+                Icon(
+                    imageVector = Icons.Filled.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(UnderstoryTheme.spacing.sm))
                 Text(stringResource(R.string.action_generate_next))
             }
         }
@@ -1251,6 +1583,7 @@ private fun AddScreen(
     SuiteScaffold(
         title = stringResource(R.string.title_add),
         onBack = onCancel,
+        showSuiteFooter = SHOW_SUITE_FOOTER,
     ) { pad ->
         Column(
             modifier = Modifier
