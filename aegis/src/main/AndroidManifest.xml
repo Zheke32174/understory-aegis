@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Suite capability registry permissions. Same pattern as passgen:
+      define our own signature-protected READ_CAPS, declare use of every
+      peer's. signature level = only same-cert callers admitted.
+    -->
+    <permission
+        android:name="com.understory.aegis.permission.READ_CAPS"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.understory.passgen.permission.READ_CAPS" />
+    <uses-permission android:name="com.understory.firewall.permission.READ_CAPS" />
+    <uses-permission android:name="com.understory.backups.permission.READ_CAPS" />
+    <uses-permission android:name="com.understory.browser.permission.READ_CAPS" />
+    <uses-permission android:name="com.understory.antivirus.permission.READ_CAPS" />
+    <uses-permission android:name="com.understory.vaultfolder.permission.READ_CAPS" />
+
+    <!--
+      Defense in depth: aegis is a local TOTP/HOTP authenticator. Like
+      passgen, it has no business touching any communication channel of
+      any kind. We strip every comms permission so a transitive library
+      cannot silently add one. The app's process will be unable to make
+      IP, SMS, cellular, satellite, Bluetooth, or NFC calls.
+
+      Note on CAMERA: TOTP enrollment usually wants a QR scan. The
+      skeleton ships gallery-only (no live camera) — the user picks an
+      already-saved screenshot of the QR and aegis decodes it
+      in-process. CAMERA stays stripped here; if a live-camera mode
+      lands later it will be a separately-toggled feature with a
+      tightly-scoped scanner Activity.
+    -->
+    <!-- IP / general networking -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" tools:node="remove" />
+    <!-- SMS / MMS -->
+    <uses-permission android:name="android.permission.SEND_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" tools:node="remove" />
+    <!-- Cellular / telephony -->
+    <uses-permission android:name="android.permission.CALL_PHONE" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_PRECISE_PHONE_STATE" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" tools:node="remove" />
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" tools:node="remove" />
+    <!-- Satellite (Android 15+) -->
+    <uses-permission android:name="android.permission.SATELLITE_COMMUNICATION" tools:node="remove" />
+    <!-- Bluetooth -->
+    <uses-permission android:name="android.permission.BLUETOOTH" tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" tools:node="remove" />
+    <!-- NFC -->
+    <uses-permission android:name="android.permission.NFC" tools:node="remove" />
+    <uses-permission android:name="android.permission.NFC_TRANSACTION_EVENT" tools:node="remove" />
+    <!-- Location is an exfiltration channel — strip it too -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" tools:node="remove" />
+    <!-- Audio capture — every form. Microphone is a quiet exfiltration channel. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" tools:node="remove" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" tools:node="remove" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_HOTWORD" tools:node="remove" />
+    <uses-permission android:name="android.permission.CAPTURE_MEDIA_OUTPUT" tools:node="remove" />
+    <uses-permission android:name="android.permission.CAPTURE_VOICE_COMMUNICATION_OUTPUT" tools:node="remove" />
+    <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION" tools:node="remove" />
+    <uses-permission android:name="android.permission.BIND_TEXT_SERVICE" tools:node="remove" />
+    <!-- Camera — same concern, image side. See note above re: gallery-only QR. -->
+    <uses-permission android:name="android.permission.CAMERA" tools:node="remove" />
+    <uses-permission android:name="android.permission.BACKGROUND_CAMERA" tools:node="remove" />
+    <uses-permission android:name="android.permission.SYSTEM_CAMERA" tools:node="remove" />
+    <!--
+      Biometrics: USE_BIOMETRIC is required for BiometricPrompt to release
+      the device-credential-bound Keystore key that wraps the vault master.
+      USE_FINGERPRINT is the legacy permission and remains stripped.
+    -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" tools:node="remove" />
+    <!-- Storage / media — no file or media access at all yet. The
+         gallery-only QR path will use ACTION_GET_CONTENT (no permission). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" tools:node="remove" />
+    <!-- Notifications / overlays — we never post or overlay -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" tools:node="remove" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove" />
+    <!-- Package query / install -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:node="remove" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" tools:node="remove" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" tools:node="remove" />
+    <!-- Accessibility binding / device admin -->
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" tools:node="remove" />
+    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" tools:node="remove" />
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" tools:node="remove" />
+    <uses-permission android:name="android.permission.BIND_QUICK_SETTINGS_TILE" tools:node="remove" />
+    <!-- Sensors / activity recognition -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" tools:node="remove" />
+    <uses-permission android:name="android.permission.BODY_SENSORS_BACKGROUND" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" tools:node="remove" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" tools:node="remove" />
+    <!-- VoIP -->
+    <uses-permission android:name="android.permission.USE_SIP" tools:node="remove" />
+    <!-- Other surfaces that touch external data -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" tools:node="remove" />
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" tools:node="remove" />
+
+    <!--
+      Limited package visibility for tamper detection. Without this, the
+      stripped QUERY_ALL_PACKAGES means PackageManager.getPackageInfo() for
+      these names would return NameNotFoundException even when they're
+      installed. Listing them here grants visibility for these specific
+      packages only, not the full installed list.
+    -->
+    <queries>
+        <!-- Suite siblings — needed for SuiteAttestation cross-verification. -->
+        <package android:name="com.understory.passgen" />
+        <package android:name="com.understory.firewall" />
+        <package android:name="com.understory.backups" />
+        <package android:name="com.understory.browser" />
+        <package android:name="com.understory.antivirus" />
+        <package android:name="com.understory.vaultfolder" />
+        <!-- Lucky Patcher and friends -->
+        <package android:name="com.chelpus.lackypatch" />
+        <package android:name="com.dimonvideo.luckypatcher" />
+        <package android:name="com.forpda.lp" />
+        <package android:name="com.android.vending.billing.InAppBillingService.LUCK" />
+        <package android:name="com.android.vending.billing.InAppBillingService.LACK" />
+        <package android:name="ru.aaaaaaac.luckypatcher" />
+        <package android:name="uret.jasi2169.patcher" />
+        <package android:name="zone.jasi2169.uretpatcher" />
+        <package android:name="ru.luckypatchers.luckypatcherinstaller" />
+        <!-- Xposed / LSPosed managers -->
+        <package android:name="de.robv.android.xposed.installer" />
+        <package android:name="org.meowcat.edxposed.manager" />
+        <package android:name="org.lsposed.manager" />
+        <package android:name="io.github.lsposed.manager" />
+        <!-- Magisk / hide-tools -->
+        <package android:name="com.topjohnwu.magisk" />
+        <package android:name="io.github.huskydg.magisk" />
+        <package android:name="com.kingoapp.apk" />
+        <package android:name="com.koushikdutta.rommanager" />
+        <package android:name="eu.chainfire.supersu" />
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.Aegis"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="false"
+        android:supportsRtl="true">
+
+        <!--
+          excludeFromRecents="true" + noHistory="true" + singleInstance
+          combined to make the activity isolated and ephemeral. They've
+          all been removed for the testing phase: launchMode="singleTask"
+          gives a normal single-instance task users can return to via
+          recents; excludeFromRecents removal lets the app appear in the
+          system app switcher; noHistory removal lets the activity
+          persist across leave/return.
+          RELEASE-BLOCKER: re-evaluate before publication. See
+          RELEASE_BLOCKERS.md for the trade-offs.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:resizeableActivity="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Aegis">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+              Open-with intent filter: aegis appears in the system
+              "Open with…" dialog when the user picks a JSON / text
+              export from a file manager or Drive. Same posture as
+              passgen — user explicitly chooses aegis at this step,
+              then has to unlock with biometric, then has to confirm
+              the import. No code path bypasses either gate.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/csv" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Aegis IME — list saved TOTP entries, tap to commitText() the
+          current code into the focused field. No clipboard, no autofill
+          IPC. Same crown-jewel pattern as passgen's IME.
+          BIND_INPUT_METHOD is signature-level; only the system can bind.
+        -->
+        <service
+            android:name=".AegisInputMethodService"
+            android:exported="true"
+            android:label="@string/ime_label"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Suite capability beacon. Read-only single-row provider that
+          attests this app's package + version to peers. Signature-locked
+          so only same-cert suite apps can query.
+        -->
+        <provider
+            android:name=".SuiteCapsProvider"
+            android:authorities="com.understory.aegis.suitecaps"
+            android:exported="true"
+            android:permission="com.understory.aegis.permission.READ_CAPS"
+            android:grantUriPermissions="false" />
+
+    </application>
+
+</manifest>
