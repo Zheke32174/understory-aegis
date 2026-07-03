@@ -23,7 +23,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aegis-debug-apk
-          path: aegis/build/outputs/apk/debug/*.apk
+          path: aegis/build/outputs/apk/**/*.apk
   # Manual-only release lane (workflow_dispatch). On a box holding the offline
   # release keystore, run the same gradle line locally with
   # -PreleaseKeystore/-PreleaseKeystorePassFile to sign and pin-assert the
