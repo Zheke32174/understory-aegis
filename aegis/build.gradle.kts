@@ -13,7 +13,7 @@ android {
         minSdk = 33
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1-skeleton"
+        versionName = "1.0-alpha"
         resourceConfigurations += listOf("en")
         base.archivesName = "aegis"
     }
