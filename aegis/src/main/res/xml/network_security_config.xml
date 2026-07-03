@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Defense in depth. The app does not request INTERNET permission, so it cannot
-  make any network call. This config additionally denies cleartext for every
-  domain — should the OS ever route traffic for us, it would be blocked.
+  Defense in depth. The real network kill-switch is the stripped INTERNET
+  permission — the app cannot open a socket at all. This config additionally
+  denies cleartext for every domain. No custom trust-anchors element: an
+  empty <trust-anchors /> is not a valid deny-all construct, so the
+  permission strip stays the actual enforcement.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
-        <trust-anchors />
-    </base-config>
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>
