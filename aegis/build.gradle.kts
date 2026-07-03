@@ -53,6 +53,9 @@ android {
 
     buildFeatures {
         compose = true
+        // BuildConfig.FLAVOR gates the developer Diagnostics surface to eng
+        // (AGP 8 disables app-module BuildConfig by default).
+        buildConfig = true
     }
 
     packaging {
