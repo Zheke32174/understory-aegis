@@ -58,14 +58,14 @@ fun AegisPlaintextExportScreen(
         val scope = rememberCoroutineScope()
 
         // Only the opaque phase name survives config change.
-        var phaseName by rememberSaveable { mutableStateOf(Phase.IDLE.name) }
-        val phase = Phase.valueOf(phaseName)
+        var phaseName by rememberSaveable { mutableStateOf(PlaintextPhase.IDLE.name) }
+        val phase = PlaintextPhase.valueOf(phaseName)
         var message by remember { mutableStateOf("") }
         // Which format the pending SAF create is for (opaque, survives config).
         var pendingFormat by rememberSaveable { mutableStateOf("") }
 
         fun writeSelected(uri: Uri) {
-            phaseName = Phase.WRITING.name
+            phaseName = PlaintextPhase.WRITING.name
             val fmt = pendingFormat
             scope.launch {
                 val outcome = runCatching {
@@ -82,8 +82,8 @@ fun AegisPlaintextExportScreen(
                     }
                 }
                 outcome.fold(
-                    onSuccess = { phaseName = Phase.DONE.name; message = "Export written." },
-                    onFailure = { phaseName = Phase.ERROR.name; message = it.messageForUser() },
+                    onSuccess = { phaseName = PlaintextPhase.DONE.name; message = "Export written." },
+                    onFailure = { phaseName = PlaintextPhase.ERROR.name; message = it.messageForUser() },
                 )
             }
         }
@@ -91,12 +91,12 @@ fun AegisPlaintextExportScreen(
         val createUris = rememberLauncherForActivityResult(
             ActivityResultContracts.CreateDocument("text/plain"),
         ) { uri: Uri? ->
-            if (uri == null) { phaseName = Phase.IDLE.name } else writeSelected(uri)
+            if (uri == null) { phaseName = PlaintextPhase.IDLE.name } else writeSelected(uri)
         }
         val createJson = rememberLauncherForActivityResult(
             ActivityResultContracts.CreateDocument("application/json"),
         ) { uri: Uri? ->
-            if (uri == null) { phaseName = Phase.IDLE.name } else writeSelected(uri)
+            if (uri == null) { phaseName = PlaintextPhase.IDLE.name } else writeSelected(uri)
         }
 
         Column(
@@ -112,7 +112,7 @@ fun AegisPlaintextExportScreen(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             when (phase) {
-                Phase.IDLE -> {
+                PlaintextPhase.IDLE -> {
                     Text(
                         "These write your TOTP/HOTP secrets in PLAINTEXT to a file you " +
                             "choose. Anyone with the file can generate your codes. Use only " +
@@ -140,12 +140,12 @@ fun AegisPlaintextExportScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Back") }
                 }
-                Phase.WRITING -> {
+                PlaintextPhase.WRITING -> {
                     Text("Writing…", style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     CircularProgressIndicator()
                 }
-                Phase.DONE -> {
+                PlaintextPhase.DONE -> {
                     Text(message, style = MaterialTheme.typography.bodyMedium,
                         color = UnderstoryTheme.semantic.success)
                     Spacer(Modifier.height(4.dp))
@@ -153,12 +153,12 @@ fun AegisPlaintextExportScreen(
                         Text("Done")
                     }
                 }
-                Phase.ERROR -> {
+                PlaintextPhase.ERROR -> {
                     Text(message, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(4.dp))
                     SecureButton(
-                        onClick = { phaseName = Phase.IDLE.name },
+                        onClick = { phaseName = PlaintextPhase.IDLE.name },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Try again") }
                     SecureOutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
@@ -172,4 +172,4 @@ fun AegisPlaintextExportScreen(
 
 private const val FORMAT_URIS = "uris"
 private const val FORMAT_JSON = "json"
-private enum class Phase { IDLE, WRITING, DONE, ERROR }
+private enum class PlaintextPhase { IDLE, WRITING, DONE, ERROR }

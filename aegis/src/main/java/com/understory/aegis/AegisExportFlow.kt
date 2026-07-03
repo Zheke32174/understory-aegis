@@ -70,8 +70,8 @@ fun AegisExportFlow(
         val ctx = LocalContext.current
         val scope = rememberCoroutineScope()
 
-        var phaseName by rememberSaveable { mutableStateOf(Phase.IDLE.name) }
-        val phase = Phase.valueOf(phaseName)
+        var phaseName by rememberSaveable { mutableStateOf(ExportPhase.IDLE.name) }
+        val phase = ExportPhase.valueOf(phaseName)
         var message by remember { mutableStateOf("") }
 
         // SAF CreateDocument for the opaque recovery kit. The file is written by
@@ -82,10 +82,10 @@ fun AegisExportFlow(
             ActivityResultContracts.CreateDocument("application/octet-stream"),
         ) { uri: Uri? ->
             if (uri == null) {
-                phaseName = Phase.IDLE.name
+                phaseName = ExportPhase.IDLE.name
                 return@rememberLauncherForActivityResult
             }
-            phaseName = Phase.WRITING.name
+            phaseName = ExportPhase.WRITING.name
             scope.launch {
                 val outcome = runCatching {
                     // KEK material is the same bytes the recovery-bundle path
@@ -102,8 +102,8 @@ fun AegisExportFlow(
                     }
                 }
                 outcome.fold(
-                    onSuccess = { phaseName = Phase.DONE.name; message = "Recovery file saved." },
-                    onFailure = { phaseName = Phase.ERROR.name; message = it.messageForUser() },
+                    onSuccess = { phaseName = ExportPhase.DONE.name; message = "Recovery file saved." },
+                    onFailure = { phaseName = ExportPhase.ERROR.name; message = it.messageForUser() },
                 )
             }
         }
@@ -121,7 +121,7 @@ fun AegisExportFlow(
                 color = MaterialTheme.colorScheme.onSurface,
             )
             when (phase) {
-                Phase.IDLE -> {
+                ExportPhase.IDLE -> {
                     Text(
                         "This saves one recovery file for your vault. Keep it somewhere " +
                             "safe — anyone who has it can open your vault. Use it to restore " +
@@ -143,12 +143,12 @@ fun AegisExportFlow(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Done") }
                 }
-                Phase.WRITING -> {
+                ExportPhase.WRITING -> {
                     Text("Writing…", style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     CircularProgressIndicator()
                 }
-                Phase.DONE -> {
+                ExportPhase.DONE -> {
                     Text(message, style = MaterialTheme.typography.bodyMedium,
                         color = UnderstoryTheme.semantic.success)
                     Spacer(Modifier.height(4.dp))
@@ -156,12 +156,12 @@ fun AegisExportFlow(
                         Text("Done")
                     }
                 }
-                Phase.ERROR -> {
+                ExportPhase.ERROR -> {
                     Text(message, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(4.dp))
                     SecureButton(
-                        onClick = { phaseName = Phase.IDLE.name },
+                        onClick = { phaseName = ExportPhase.IDLE.name },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Try again") }
                     SecureOutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
@@ -173,4 +173,4 @@ fun AegisExportFlow(
     }
 }
 
-private enum class Phase { IDLE, WRITING, DONE, ERROR }
+private enum class ExportPhase { IDLE, WRITING, DONE, ERROR }
