@@ -17,26 +17,43 @@ import java.io.Reader
  *      a separate tool. This delegates to [GoogleAuthMigration.parse] per
  *      line so the existing protobuf parser is reused.
  *
- *   2. **Proton Authenticator JSON export** — actual format observed from
- *      Proton's app (validated against a real backup):
+ *   2. **Proton Authenticator JSON export** — the exact schema Proton's
+ *      Rust core (`proton-pass-common`, `AuthenticatorEntriesExport`) emits
+ *      for an *unencrypted* export:
  *        { "version": 1,
  *          "entries": [
  *            { "id": "<uuid>",
  *              "content": {
- *                "uri": "otpauth://totp/...?secret=...&issuer=...&...",
- *                "entry_type": "Totp",
- *                "name": "..."
+ *                "uri": "otpauth://totp/<label>?secret=...&issuer=...&...",
+ *                "entry_type": "Totp",           // serde enum, exactly "Totp" | "Steam"
+ *                "name": "..."                   // Option<String>, may be null
  *              },
- *              "note": null }
+ *              "note": null }                    // Option<String>, may be null
  *          ] }
- *      The `content.uri` field is a fully-qualified `otpauth://` URI, so
- *      we delegate to [OtpAuthEntry.parse] for each entry rather than
- *      re-parsing components — Proton has already encoded the canonical
- *      shape and our existing URI parser handles every case the QR path
- *      handles, including URL-encoded labels and SHA256/SHA512 algorithms.
- *      `content.name` is used to fill the account when the URI omits one
- *      (rare but observed for entries where the user added them manually
- *      without an account label).
+ *      Notes verified against Proton's source:
+ *        - `entry_type` is a serde-serialized enum with only two variants,
+ *          the exact strings `"Totp"` and `"Steam"` (PascalCase, no rename).
+ *        - For a TOTP entry `content.uri` is a fully-qualified `otpauth://totp/`
+ *          URI: Proton puts the account in the path and the issuer in the
+ *          `issuer=` query param (it does NOT emit the `Issuer:Account` label
+ *          form), plus explicit `algorithm`/`digits`/`period`. We delegate to
+ *          [OtpAuthEntry.parse]; our URI parser already handles issuer-param
+ *          precedence, URL-encoded labels, and SHA256/SHA512.
+ *        - For a STEAM entry `content.uri` is `steam://<secret>` (NOT otpauth)
+ *          and `entry_type` is `"Steam"`. Steam codes use a custom 5-char
+ *          alphabet truncation, NOT RFC-6238 digit truncation, so aegis's
+ *          standard generator ([AegisCode]) cannot reproduce them. We reject
+ *          Steam entries per-entry with an honest message rather than importing
+ *          a look-alike that would silently generate wrong codes.
+ *        - Proton has NO HOTP entries (only Totp and Steam).
+ *      `content.name` is used to fill the account only when the URI omits one.
+ *
+ *      **Encrypted Proton export** — a password-protected export is a different
+ *      top-level shape: `{ "version": 1, "salt": "<b64>", "content": "<b64>" }`
+ *      (Argon2id + AES-GCM; the encrypted entries live inside `content`). It has
+ *      NO `entries` array. We cannot decrypt it (no passphrase-prompt UI and no
+ *      Argon2id on our classpath here), so we detect it up front and refuse with
+ *      a clear, actionable message telling the user to re-export unencrypted.
  *
  *   3. **Generic flat OTP JSON** — third-party decoders (e.g. tools that
  *      convert Google Authenticator transfer QRs to JSON offline) emit a
@@ -59,7 +76,25 @@ import java.io.Reader
  */
 object FileImports {
 
-    enum class Format { OTPAUTH_MIGRATION_URIS, AEGIS_AUTH_JSON, PROTON_AUTH_JSON, GENERIC_OTP_JSON, UNKNOWN }
+    /**
+     * Shown when the user picks an *encrypted* (password-protected) Proton
+     * Authenticator export. We cannot decrypt it here, so the honest action is
+     * to re-export without a password. Matches the tone of the encrypted-Aegis
+     * rejection in [parseAegisAuthJson].
+     */
+    private const val ENCRYPTED_PROTON_MESSAGE: String =
+        "This is an encrypted (password-protected) Proton Authenticator export. " +
+            "Understory OTP can't decrypt it. In Proton Authenticator, export again " +
+            "WITHOUT a password (the unencrypted JSON option), then import that file."
+
+    enum class Format {
+        OTPAUTH_MIGRATION_URIS,
+        AEGIS_AUTH_JSON,
+        PROTON_AUTH_JSON,
+        PROTON_ENCRYPTED_JSON,
+        GENERIC_OTP_JSON,
+        UNKNOWN,
+    }
 
     data class ImportSummary(
         val entries: List<OtpAuthEntry>,
@@ -72,6 +107,37 @@ object FileImports {
     /** Sniff format from the first chunk of the file. */
     fun detect(sample: String): Format {
         val trimmed = sample.trimStart()
+        if (trimmed.startsWith("{")) {
+            // Encrypted-Proton check FIRST. Two tiers so it works whether or not
+            // the (possibly truncated 2048-char) sample is parseable JSON:
+            //   1. If the whole sample parses, confirm structurally — top-level
+            //      `salt` string + `content` STRING + NO `entries` array. This
+            //      avoids the false-positive where unencrypted Proton has a
+            //      `content` OBJECT per entry.
+            //   2. If it does NOT parse (the encrypted `content` base64 is long
+            //      and gets cut off mid-string), fall back to top-level key
+            //      markers: a `"salt"` key AND a `"content"` key but NO
+            //      `"entries"`/`"entry_type"`/`"items"` — the encrypted shape is
+            //      the only Proton export carrying a top-level `salt`.
+            val parsed = runCatching { JSONObject(trimmed) }.getOrNull()
+            if (parsed != null) {
+                val hasSaltStr = parsed.optString("salt", "").isNotEmpty()
+                val hasContentStr = parsed.opt("content") is String &&
+                    parsed.optString("content", "").isNotEmpty()
+                val hasEntriesArr = parsed.optJSONArray("entries") != null
+                if (hasSaltStr && hasContentStr && !hasEntriesArr) {
+                    return Format.PROTON_ENCRYPTED_JSON
+                }
+            } else {
+                val lower = trimmed.take(2048).lowercase()
+                val looksEncrypted = lower.contains("\"salt\"") &&
+                    lower.contains("\"content\"") &&
+                    !lower.contains("\"entries\"") &&
+                    !lower.contains("\"entry_type\"") &&
+                    !lower.contains("\"items\"")
+                if (looksEncrypted) return Format.PROTON_ENCRYPTED_JSON
+            }
+        }
         if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
             // JSON path. Both Proton Authenticator and generic flat exports
             // dispatch to the same parser, which checks per-entry shape; for
@@ -109,6 +175,7 @@ object FileImports {
             Format.OTPAUTH_MIGRATION_URIS -> parseMigrationUris(text)
             Format.AEGIS_AUTH_JSON -> parseAegisAuthJson(text)
             Format.PROTON_AUTH_JSON -> parseProtonAuthJson(text)
+            Format.PROTON_ENCRYPTED_JSON -> throw IllegalArgumentException(ENCRYPTED_PROTON_MESSAGE)
             Format.GENERIC_OTP_JSON -> parseProtonAuthJson(text)
             Format.UNKNOWN -> throw IllegalArgumentException(
                 "Unrecognised file. Expected one or more `otpauth-migration://` " +
@@ -160,6 +227,16 @@ object FileImports {
             trimmed.startsWith("[") -> JSONArray(trimmed)
             trimmed.startsWith("{") -> {
                 val obj = JSONObject(trimmed)
+                // Defense in depth: if an encrypted Proton export reaches this
+                // parser directly (a detect() miss on a truncated sample, or a
+                // direct call), refuse with the same honest message rather than
+                // the generic "no entries/items" error below.
+                if (obj.optString("salt", "").isNotEmpty() &&
+                    obj.opt("content") is String &&
+                    obj.optJSONArray("entries") == null
+                ) {
+                    throw IllegalArgumentException(ENCRYPTED_PROTON_MESSAGE)
+                }
                 obj.optJSONArray("entries")
                     ?: obj.optJSONArray("items")
                     ?: throw IllegalArgumentException(
@@ -271,12 +348,27 @@ object FileImports {
     }
 
     private fun parseOneJsonEntry(o: JSONObject): OtpAuthEntry {
-        // Proton Authenticator: `content.uri` is a complete otpauth:// URI.
-        // Delegate to the canonical URI parser so we share the QR path's
-        // semantics (URL-encoded labels, every algorithm/digit/period combo).
+        // Proton Authenticator: entry is `{ id, content:{uri, entry_type, name}, note }`.
         val content = o.optJSONObject("content")
         if (content != null) {
             val uri = content.optString("uri")
+            // Proton's `entry_type` is the serde enum "Totp" | "Steam". Branch
+            // on it (and on the URI scheme) so a Steam entry is rejected with an
+            // honest message instead of being fed to the otpauth parser — which
+            // would either throw a cryptic "not an otpauth URI" or, worse, get
+            // coerced into a standard-TOTP look-alike that generates codes Steam
+            // rejects. Steam's 5-char alphabet truncation is NOT representable by
+            // aegis's RFC-6238 generator, so we refuse rather than mis-import.
+            val entryType = content.optString("entry_type").trim()
+            val isSteam = entryType.equals("Steam", ignoreCase = true) ||
+                uri.trim().startsWith("steam://", ignoreCase = true)
+            if (isSteam) {
+                throw IllegalArgumentException(
+                    "Steam entry not supported: Steam codes use a custom 5-character " +
+                        "alphabet, not standard TOTP digits, so this app can't generate " +
+                        "them. Keep this account in Proton Authenticator or Steam Guard."
+                )
+            }
             if (uri.isNotEmpty()) {
                 val parsed = OtpAuthEntry.parse(uri)
                 val displayName = content.optString("name")
@@ -289,6 +381,11 @@ object FileImports {
                     parsed
                 }
             }
+            // A Proton `content` object with an empty/absent uri is malformed —
+            // surface it honestly rather than silently falling through to the
+            // flat-schema branch (which would then report a misleading "missing
+            // secret").
+            throw IllegalArgumentException("Proton entry `content.uri` is empty")
         }
 
         // Generic flat schema: `secret` (base32) + companion fields.

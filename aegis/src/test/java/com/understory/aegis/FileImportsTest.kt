@@ -202,6 +202,223 @@ class FileImportsTest {
     }
 
     @Test
+    fun protonAuthJsonRealExportShapeWithNotesAndSteamReject() {
+        // Full realistic Proton Authenticator UNENCRYPTED export, matching the
+        // exact schema Proton's Rust core emits (AuthenticatorEntriesExport):
+        //   { version, entries:[ { id, content:{uri, entry_type, name}, note } ] }
+        // - TOTP entry: content.uri is otpauth://totp/<label>?secret&issuer&...
+        //   with the issuer ONLY in the query param (Proton does not emit the
+        //   Issuer:Account label form) — SHA512 / 8 digits / 45s period here.
+        // - Steam entry: entry_type "Steam", content.uri "steam://<secret>" —
+        //   must be rejected per-entry (not representable by our generator), the
+        //   surrounding TOTP entries must still import.
+        val json = """
+{
+  "version": 1,
+  "entries": [
+    { "id": "0e5f0b1a-1111-4a2b-8c3d-000000000001",
+      "content": {
+        "uri": "otpauth://totp/alice%40example.com?secret=$sampleSecretBase32&issuer=GitHub&algorithm=SHA512&digits=8&period=45",
+        "entry_type": "Totp",
+        "name": "alice@example.com"
+      },
+      "note": "work account" },
+    { "id": "0e5f0b1a-2222-4a2b-8c3d-000000000002",
+      "content": {
+        "uri": "steam://$sampleSecretBase32",
+        "entry_type": "Steam",
+        "name": "SteamGuard"
+      },
+      "note": null },
+    { "id": "0e5f0b1a-3333-4a2b-8c3d-000000000003",
+      "content": {
+        "uri": "otpauth://totp/bob?secret=$sampleSecretBase32&issuer=GitLab&algorithm=SHA1&digits=6&period=30",
+        "entry_type": "Totp",
+        "name": "bob"
+      },
+      "note": null }
+  ]
+}
+        """.trimIndent()
+        val summary = FileImports.parseProtonAuthJson(json)
+        // Two TOTP entries survive; the Steam entry is a single honest error.
+        assertEquals(2, summary.entries.size)
+        assertEquals(1, summary.errorCount)
+        assertTrue(summary.errors[0].contains("entry 1"))
+        assertTrue(summary.errors[0].contains("Steam"))
+
+        val gh = summary.entries[0]
+        assertEquals("GitHub", gh.issuer)
+        assertEquals("alice@example.com", gh.account)
+        assertEquals(OtpAuthEntry.Type.TOTP, gh.type)
+        assertEquals(OtpAuthEntry.Algorithm.SHA512, gh.algorithm)
+        assertEquals(8, gh.digits)
+        assertEquals(45, gh.period)
+
+        val gl = summary.entries[1]
+        assertEquals("GitLab", gl.issuer)
+        assertEquals("bob", gl.account)
+        assertEquals(OtpAuthEntry.Algorithm.SHA1, gl.algorithm)
+    }
+
+    @Test
+    fun protonSteamEntryDetectedByUriSchemeEvenWithoutEntryType() {
+        // Robustness: a Steam entry whose entry_type field is missing but whose
+        // content.uri is steam:// must still be rejected honestly, not coerced
+        // through the otpauth parser.
+        val json = """
+{"version":1,"entries":[
+  {"id":"x","content":{"uri":"steam://$sampleSecretBase32","name":"SteamGuard"},"note":null}
+]}
+        """.trimIndent()
+        val summary = FileImports.parseProtonAuthJson(json)
+        assertEquals(0, summary.entries.size)
+        assertEquals(1, summary.errorCount)
+        assertTrue(summary.errors[0].contains("Steam"))
+    }
+
+    @Test
+    fun protonEntryWithEmptyUriIsHonestPerEntryError() {
+        // A Proton `content` object with an empty uri is malformed. It must
+        // surface as its own error (not silently fall through to the flat-schema
+        // "missing secret" path, and not crash the whole import).
+        val json = """
+{"version":1,"entries":[
+  {"id":"x","content":{"uri":"","entry_type":"Totp","name":"n"},"note":null},
+  {"id":"y","content":{"uri":"otpauth://totp/ok?secret=$sampleSecretBase32&issuer=OK&algorithm=SHA1&digits=6&period=30","entry_type":"Totp","name":"ok"},"note":null}
+]}
+        """.trimIndent()
+        val summary = FileImports.parseProtonAuthJson(json)
+        assertEquals(1, summary.entries.size)
+        assertEquals(1, summary.errorCount)
+        assertTrue(summary.errors[0].contains("entry 0"))
+        assertEquals("OK", summary.entries[0].issuer)
+    }
+
+    // ---------- Proton ENCRYPTED export (honest reject) ----------
+
+    @Test
+    fun detectsEncryptedProtonExport() {
+        // Proton's password-protected export: top-level {version, salt, content}
+        // with content a base64 STRING and NO entries array.
+        val text = """{"version":1,"salt":"c2FsdHNhbHRzYWx0MTY=","content":"ZW5jcnlwdGVkYmxvYmJhc2U2NA=="}"""
+        assertEquals(FileImports.Format.PROTON_ENCRYPTED_JSON, FileImports.detect(text))
+    }
+
+    @Test
+    fun detectsEncryptedProtonExportEvenWhenContentIsTruncated() {
+        // Real encrypted exports have a very long `content` base64; the 2048-char
+        // detect() sample can cut it off mid-string so the JSON won't parse. The
+        // key-marker fallback must still classify it as encrypted (salt+content,
+        // no entries/entry_type/items).
+        val longContent = "A".repeat(5000)
+        val text = """{"version":1,"salt":"c2FsdHNhbHQ=","content":"$longContent"""  // deliberately unterminated
+        assertEquals(FileImports.Format.PROTON_ENCRYPTED_JSON, FileImports.detect(text))
+    }
+
+    @Test
+    fun parseAutoRejectsEncryptedProtonWithHonestMessage() {
+        val text = """{"version":1,"salt":"c2FsdHNhbHRzYWx0MTY=","content":"ZW5jcnlwdGVkYmxvYg=="}"""
+        try {
+            FileImports.parseAuto(text.reader())
+            fail("expected encrypted-Proton rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("encrypted"))
+            assertTrue(e.message!!.contains("WITHOUT a password"))
+        }
+    }
+
+    @Test
+    fun parseProtonAuthJsonRejectsEncryptedShapeDirectly() {
+        // Defense in depth: even called directly (bypassing detect), an encrypted
+        // shape yields the honest message, not "no entries/items".
+        val text = """{"version":1,"salt":"c2FsdA==","content":"Y2lwaGVy"}"""
+        try {
+            FileImports.parseProtonAuthJson(text)
+            fail("expected encrypted-Proton rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("encrypted"))
+        }
+    }
+
+    @Test
+    fun unencryptedProtonNotMisdetectedAsEncrypted() {
+        // Guard: unencrypted Proton entries each carry a `content` OBJECT (and a
+        // per-entry uri); there is no top-level salt. Must NOT be flagged
+        // encrypted.
+        val text = """{"version":1,"entries":[{"id":"x","content":{"uri":"otpauth://totp/A?secret=$sampleSecretBase32&issuer=B","entry_type":"Totp","name":"A"},"note":null}]}"""
+        assertEquals(FileImports.Format.PROTON_AUTH_JSON, FileImports.detect(text))
+    }
+
+    @Test
+    fun protonImportMergesWithoutDuplicatesAcrossPaths() {
+        // Proton entries must dedup through the same AegisMerge the QR/file/Google
+        // paths use. Import a Proton export, then re-merge the same entries — the
+        // second pass adds nothing.
+        val json = """
+{"version":1,"entries":[
+  {"id":"a","content":{"uri":"otpauth://totp/alice?secret=$sampleSecretBase32&issuer=PyPI&algorithm=SHA1&digits=6&period=30","entry_type":"Totp","name":"alice"},"note":null}
+]}
+        """.trimIndent()
+        val summary = FileImports.parseProtonAuthJson(json)
+        assertEquals(1, summary.entries.size)
+
+        val first = AegisMerge.merge(emptyList(), summary.entries)
+        assertEquals(1, first.added)
+        assertEquals(0, first.skipped)
+
+        // Re-parse (fresh secret bytes) and merge into the already-populated vault.
+        val summary2 = FileImports.parseProtonAuthJson(json)
+        val second = AegisMerge.merge(first.merged, summary2.entries)
+        assertEquals(0, second.added)
+        assertEquals(1, second.skipped)
+        assertEquals(1, second.merged.size)
+    }
+
+    @Test
+    fun protonImportedTotpGeneratesCorrectCode() {
+        // End-to-end: a Proton TOTP entry, once materialized into an AegisEntry,
+        // must produce the parameter-correct code the issuer expects. Compare
+        // against an independent RFC-6238 computation over the same secret/params.
+        val secretB32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" // "12345678..." repeated, valid base32
+        val json = """
+{"version":1,"entries":[
+  {"id":"a","content":{"uri":"otpauth://totp/acct?secret=$secretB32&issuer=Iss&algorithm=SHA1&digits=6&period=30","entry_type":"Totp","name":"acct"},"note":null}
+]}
+        """.trimIndent()
+        val summary = FileImports.parseProtonAuthJson(json)
+        assertEquals(1, summary.entries.size)
+        val entry = AegisEntry.fromOtpAuth(summary.entries[0])
+        val now = 1_700_000_000L
+        val got = AegisCode.totp(entry, now)
+        val expected = referenceTotpSha1(
+            HotpSecret.decodeBase32(secretB32), now / 30, 6,
+        )
+        assertEquals(expected, got)
+    }
+
+    /** Independent RFC-6238 SHA1 TOTP for cross-checking AegisCode. */
+    private fun referenceTotpSha1(secret: ByteArray, counter: Long, digits: Int): String {
+        val counterBytes = ByteArray(8)
+        var c = counter
+        for (i in 7 downTo 0) { counterBytes[i] = (c and 0xFF).toByte(); c = c ushr 8 }
+        val mac = javax.crypto.Mac.getInstance("HmacSHA1").apply {
+            init(javax.crypto.spec.SecretKeySpec(secret, "HmacSHA1"))
+        }
+        val hash = mac.doFinal(counterBytes)
+        val offset = hash[hash.size - 1].toInt() and 0x0F
+        val truncated =
+            ((hash[offset].toInt() and 0x7F) shl 24) or
+                ((hash[offset + 1].toInt() and 0xFF) shl 16) or
+                ((hash[offset + 2].toInt() and 0xFF) shl 8) or
+                (hash[offset + 3].toInt() and 0xFF)
+        var mod = 1L
+        repeat(digits) { mod *= 10L }
+        val codeInt = (truncated.toLong() and 0xFFFFFFFFL) % mod
+        return codeInt.toString().padStart(digits, '0')
+    }
+
+    @Test
     fun protonAuthJsonIgnoresContentNameWhenUriHasAccount() {
         // Confirms we don't clobber URI-supplied account labels with
         // content.name (which can drift from the URI).
