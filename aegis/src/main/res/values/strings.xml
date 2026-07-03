@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">aegis</string>
-    <string name="ime_label">aegis keyboard</string>
+    <!--
+      Store-facing name (design §7): "Understory OTP" — resolves the head-on
+      collision with the complement target Aegis Authenticator. Package id
+      stays com.understory.aegis and the internal codename stays "aegis", so no
+      reinstall / signing / attestation churn.
+    -->
+    <string name="app_name">Understory OTP</string>
+    <string name="ime_label">Understory OTP keyboard</string>
 </resources>

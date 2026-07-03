@@ -32,6 +32,23 @@ data class AegisEntry(
     fun secretBytes(): ByteArray =
         android.util.Base64.decode(secretB64, android.util.Base64.NO_WRAP)
 
+    /**
+     * Inverse of [fromOtpAuth]: build an [OtpAuthEntry] carrying this entry's
+     * raw secret + all params, for export via [OtpAuthEntry.toUri] or the
+     * Aegis-compatible JSON exporter. The returned entry owns a fresh secret
+     * ByteArray; caller must [OtpAuthEntry.wipeSecret] it after use.
+     */
+    fun toOtpAuthEntry(): OtpAuthEntry = OtpAuthEntry(
+        type = type,
+        issuer = issuer,
+        account = account,
+        secret = secretBytes(),
+        digits = digits,
+        period = period,
+        counter = counter,
+        algorithm = algorithm,
+    )
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("issuer", issuer)

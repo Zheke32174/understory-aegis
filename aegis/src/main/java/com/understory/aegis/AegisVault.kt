@@ -24,9 +24,15 @@ import java.io.File
  * memory between BiometricPrompt success and `lock()`. The Keystore copy
  * is what daily unlock uses; cannot leave Keystore.
  *
- * Snake-eats-tail: the master KEK is also stored as the vault's first
- * entry (for paper transcription / disaster recovery), same pattern as
- * passgen.
+ * Recovery (design §4): the vault does NOT seal its master KEK as a fake
+ * entry[0]. That artifact had zero recovery value (aegis has no reveal path,
+ * the "code" it produced was a meaningless TOTP-of-the-KEK) and was a hazard
+ * (deletable, IME-listed, off-by-one entry count). Real recovery is the shared
+ * [com.understory.security.VaultRecovery] contract: a user-held encrypted
+ * export made via the Export sheet, restorable after a biometric change or a
+ * lost phone. Legacy vaults that still carry the stray entry[0] self-heal on
+ * unlock (see [MASTER_KEK_LEGACY_ISSUER]/[MASTER_KEK_LEGACY_ACCOUNT] and
+ * [parse]).
  */
 object AegisVault {
 
@@ -35,6 +41,16 @@ object AegisVault {
 
     /** 32-byte symmetric KEK — same size as passgen. */
     private const val MASTER_KEK_BYTES = 32
+
+    /**
+     * Marker of the legacy fake master-KEK entry that old [createV2] builds
+     * sealed as entry[0]. Any entry with this exact (issuer, account) is a
+     * recovery artifact from before design §4.3 — never a usable TOTP — and is
+     * dropped on load ([parse]) so existing installs self-heal without user
+     * action and the entry count becomes honest.
+     */
+    const val MASTER_KEK_LEGACY_ISSUER = "aegis"
+    const val MASTER_KEK_LEGACY_ACCOUNT = "vault master key"
 
     fun exists(ctx: Context): Boolean = File(ctx.filesDir, FILE).exists()
 
@@ -63,9 +79,10 @@ object AegisVault {
      * Keystore key. The cipher's doFinal will succeed only if the user has
      * actually authenticated.
      *
-     * Snake-eats-tail: stores the master KEK as the first vault entry so
-     * the user can transcribe it for disaster recovery (biometric-gated
-     * reveal, mirroring passgen).
+     * The vault starts EMPTY (design §4.3). The master KEK is recoverable
+     * operationally via the Keystore wrap (daily unlock) and, for disaster
+     * recovery, via a user-held encrypted export (Export sheet, §3) — it is
+     * never sealed into the vault as a self-copy, which added only risk.
      */
     fun createV2(
         ctx: Context,
@@ -77,23 +94,7 @@ object AegisVault {
             val wrappedKekCt = deviceAuthEncryptCipher.doFinal(masterKek)
             val wrappedKekIv = deviceAuthEncryptCipher.iv
 
-            // Seal the master into the vault as entry[0] for recovery.
-            val masterB64 = android.util.Base64.encodeToString(
-                masterKek,
-                android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
-            )
-            val masterEntry = AegisEntry(
-                issuer = "aegis",
-                account = "vault master key",
-                secretB64 = masterB64,
-                // Stored as TOTP-shape but it's not really a TOTP — the
-                // type is a stretch here; we keep TOTP so UI doesn't have
-                // a special case. The "code" generated from this would be
-                // valid TOTP for whoever holds the secret, but we never
-                // intend to USE it as a TOTP — it's a recovery artifact.
-                type = com.understory.security.OtpAuthEntry.Type.TOTP,
-            )
-            val contents = AegisVaultContents(entries = listOf(masterEntry))
+            val contents = AegisVaultContents(entries = emptyList())
             val plaintext = serialize(contents).toByteArray(Charsets.UTF_8)
             val contentCt = Crypto.aesGcmEncrypt(masterKek, plaintext)
             Crypto.wipe(plaintext)
@@ -230,7 +231,14 @@ object AegisVault {
         val o = JSONObject(text)
         val arr = o.optJSONArray("entries") ?: JSONArray()
         val entries = mutableListOf<AegisEntry>()
-        for (i in 0 until arr.length()) entries.add(AegisEntry.fromJson(arr.getJSONObject(i)))
+        for (i in 0 until arr.length()) {
+            val e = AegisEntry.fromJson(arr.getJSONObject(i))
+            // Self-heal legacy vaults: silently drop the old fake master-KEK
+            // entry[0] (design §4.3). It was never a usable TOTP, so nothing a
+            // user can use is lost, and the count/first-run become honest.
+            if (e.issuer == MASTER_KEK_LEGACY_ISSUER && e.account == MASTER_KEK_LEGACY_ACCOUNT) continue
+            entries.add(e)
+        }
         return AegisVaultContents(entries)
     }
 

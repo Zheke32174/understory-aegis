@@ -59,7 +59,7 @@ import java.io.Reader
  */
 object FileImports {
 
-    enum class Format { OTPAUTH_MIGRATION_URIS, PROTON_AUTH_JSON, GENERIC_OTP_JSON, UNKNOWN }
+    enum class Format { OTPAUTH_MIGRATION_URIS, AEGIS_AUTH_JSON, PROTON_AUTH_JSON, GENERIC_OTP_JSON, UNKNOWN }
 
     data class ImportSummary(
         val entries: List<OtpAuthEntry>,
@@ -80,6 +80,12 @@ object FileImports {
             // displayed in error messages.
             val lower = trimmed.take(2048).lowercase()
             return when {
+                // Real Aegis Authenticator: entries live under `db.entries[]`
+                // with per-entry `info`. Checked FIRST — the generic `"entries"`
+                // branch below would otherwise swallow it and then fail (the
+                // array is under `db`, and each secret is under `info.secret`).
+                lower.contains("\"db\"") && lower.contains("\"info\"") ->
+                    Format.AEGIS_AUTH_JSON
                 lower.contains("\"entry_type\"") ||
                     lower.contains("\"protonauth\"") ->
                     Format.PROTON_AUTH_JSON
@@ -101,12 +107,13 @@ object FileImports {
         val text = reader.readText()
         return when (detect(text.take(2048))) {
             Format.OTPAUTH_MIGRATION_URIS -> parseMigrationUris(text)
+            Format.AEGIS_AUTH_JSON -> parseAegisAuthJson(text)
             Format.PROTON_AUTH_JSON -> parseProtonAuthJson(text)
             Format.GENERIC_OTP_JSON -> parseProtonAuthJson(text)
             Format.UNKNOWN -> throw IllegalArgumentException(
                 "Unrecognised file. Expected one or more `otpauth-migration://` " +
-                    "URIs (one per line), a Proton Authenticator JSON export, " +
-                    "or a generic OTP JSON export."
+                    "URIs (one per line), an Aegis Authenticator JSON export, a " +
+                    "Proton Authenticator JSON export, or a generic OTP JSON export."
             )
         }
     }
@@ -179,7 +186,89 @@ object FileImports {
         return ImportSummary(entries, errors, multiBatchHint = null)
     }
 
+    /**
+     * Parse a real Aegis Authenticator plaintext export (design §3.2). Entries
+     * live under `db.entries[]`; each carries `type`, root `name`/`issuer`, and
+     * an `info` object holding `secret` (base32), `algo`, `digits`, and either
+     * `period` (TOTP) or `counter` (HOTP).
+     *
+     * Boundaries surfaced honestly rather than silently mishandled:
+     *   - `header.slots != null` → the vault is ENCRYPTED (scrypt key-slots +
+     *     AES-GCM db). One clear error; decrypt is a tracked v1.5 item.
+     *   - `type == "steam"` → per-entry error (Steam's truncation differs; do
+     *     NOT import it as TOTP).
+     */
+    fun parseAegisAuthJson(text: String): ImportSummary {
+        val root = JSONObject(text.trim())
+
+        // Encrypted Aegis vault: header.slots is a populated array. Refuse with
+        // a clear, actionable message instead of a downstream parse failure.
+        val header = root.optJSONObject("header")
+        if (header != null && !header.isNull("slots") && header.optJSONArray("slots") != null) {
+            throw IllegalArgumentException(
+                "This is an encrypted Aegis vault. In Aegis Authenticator, export an " +
+                    "*unencrypted* JSON, or use a password-encrypted Understory backup."
+            )
+        }
+
+        val db = root.optJSONObject("db")
+            ?: throw IllegalArgumentException("Aegis export missing `db` object.")
+        val arr = db.optJSONArray("entries") ?: JSONArray()
+
+        val entries = mutableListOf<OtpAuthEntry>()
+        val errors = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i)
+            if (o == null) {
+                errors += "entry $i: not an object"
+                continue
+            }
+            try {
+                entries += parseOneAegisEntry(o)
+            } catch (t: Throwable) {
+                errors += "entry $i: ${t.message ?: t.javaClass.simpleName}"
+            }
+        }
+        return ImportSummary(entries, errors, multiBatchHint = null)
+    }
+
     // ---------- private helpers ----------
+
+    private fun parseOneAegisEntry(o: JSONObject): OtpAuthEntry {
+        val type = when (o.optString("type", "totp").lowercase()) {
+            "totp" -> OtpAuthEntry.Type.TOTP
+            "hotp" -> OtpAuthEntry.Type.HOTP
+            "steam" -> throw IllegalArgumentException(
+                "Steam OTP not supported (its code truncation differs from standard TOTP)."
+            )
+            else -> throw IllegalArgumentException("unknown Aegis entry type")
+        }
+        val info = o.optJSONObject("info")
+            ?: throw IllegalArgumentException("missing `info`")
+        val secretStr = info.optString("secret")
+        require(secretStr.isNotEmpty()) { "missing `info.secret`" }
+        val secretBytes = HotpSecret.decodeBase32(secretStr)
+
+        val algo = when (info.optString("algo", "SHA1").uppercase()) {
+            "SHA256" -> OtpAuthEntry.Algorithm.SHA256
+            "SHA512" -> OtpAuthEntry.Algorithm.SHA512
+            else -> OtpAuthEntry.Algorithm.SHA1
+        }
+        val digits = info.optInt("digits", 6).let { if (it == 0) 6 else it }
+        val period = info.optInt("period", 30).let { if (it == 0) 30 else it }
+        val counter = info.optLong("counter", 0)
+
+        return OtpAuthEntry(
+            type = type,
+            issuer = o.optString("issuer"),
+            account = o.optString("name"),
+            secret = secretBytes,
+            digits = digits,
+            period = period,
+            counter = counter,
+            algorithm = algo,
+        )
+    }
 
     private fun parseOneJsonEntry(o: JSONObject): OtpAuthEntry {
         // Proton Authenticator: `content.uri` is a complete otpauth:// URI.

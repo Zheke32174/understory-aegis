@@ -20,15 +20,11 @@ import com.understory.backup.BackupAdapter
  * backups app, or the in-app export UI) must surface that to the user
  * with a "unlock first" prompt.
  *
- * Import semantics: **merge with dedup, prefer existing**. Reasoning:
- *   - The user already has working entries; an import shouldn't destroy
- *     a known-good current state in favor of a possibly-stale backup.
- *   - Duplicates are detected by (issuer, account) tuple — the natural
- *     identity of a TOTP entry. Empty-issuer-empty-account entries are
- *     considered always-distinct (each one stands on its own).
- *   - The import's secret bytes for a duplicate are NOT applied; the
- *     existing secret wins. This is conservative — re-enrolling an
- *     account from QR is the right path to update its secret.
+ * Import semantics: **merge with dedup, prefer existing** via the shared
+ * [AegisMerge] (design §3.4), keyed on `(issuer, account, secretB64)` so the
+ * file-import, QR-migration, and adapter paths all agree. A duplicate (same
+ * issuer/account AND same secret) is skipped; a same-account entry with a
+ * DIFFERENT secret (re-enrollment) is kept, matching the file-import path.
  *
  * Returned summary string is human-readable and used by the caller's
  * Toast/snackbar surface.
@@ -38,12 +34,15 @@ object AegisBackupAdapter : BackupAdapter {
     override val appId: String = "com.understory.aegis"
 
     /**
-     * Bump only when the JSON shape inside the payload changes
-     * incompatibly. Backwards-compatible additions (a new optional
-     * field with a sensible default) don't require a bump — readers
-     * tolerate unknown fields per existing parse() semantics.
+     * schemaVersion 2 = the split-key recovery model (design §3.4 /
+     * shared-vault-recovery §3.4): the encrypted `.usbe` payload is this
+     * adapter's cleartext vault JSON encrypted under the user-held RECOVERY
+     * key, not the hardware KEK, so it restores onto a fresh vault on a new
+     * device. This meets [com.understory.backup.VaultRecoveryEnvelope.SchemaVersions.SPLIT_KEY_MIN].
+     * The JSON shape itself is unchanged from v1 and readers tolerate unknown
+     * fields, so [import] accepts v1 and v2 payloads identically.
      */
-    override val schemaVersion: Int = 1
+    override val schemaVersion: Int = 2
 
     override fun export(): ByteArray {
         val vault = AegisVaultManager.current
@@ -66,39 +65,18 @@ object AegisBackupAdapter : BackupAdapter {
         val payloadText = payload.toString(Charsets.UTF_8)
         val incoming = AegisVault.parse(payloadText)
 
-        // Build an index of existing identities so dedup is O(N+M).
-        // (issuer, account) is the natural unique key. Both empty means
-        // "anonymous" — never deduped, every one stands on its own.
-        val existingKeys = vault.contents.entries
-            .filter { it.issuer.isNotEmpty() || it.account.isNotEmpty() }
-            .map { it.issuer to it.account }
-            .toHashSet()
-
-        val toAdd = mutableListOf<AegisEntry>()
-        var skipped = 0
-        for (entry in incoming.entries) {
-            val key = entry.issuer to entry.account
-            val isAnonymous = entry.issuer.isEmpty() && entry.account.isEmpty()
-            if (!isAnonymous && key in existingKeys) {
-                skipped++
-            } else {
-                toAdd += entry
-            }
-        }
-
-        if (toAdd.isNotEmpty()) {
-            vault.contents = vault.contents.copy(
-                entries = vault.contents.entries + toAdd,
-            )
+        val result = AegisMerge.mergeEntries(vault.contents.entries, incoming.entries)
+        if (result.added > 0) {
+            vault.contents = vault.contents.copy(entries = result.merged)
             vault.save()
         }
 
         return buildString {
-            append("Imported ${toAdd.size} new ")
-            append(if (toAdd.size == 1) "entry" else "entries")
-            if (skipped > 0) {
-                append("; $skipped duplicate")
-                if (skipped != 1) append("s")
+            append("Imported ${result.added} new ")
+            append(if (result.added == 1) "entry" else "entries")
+            if (result.skipped > 0) {
+                append("; ${result.skipped} duplicate")
+                if (result.skipped != 1) append("s")
                 append(" kept existing")
             }
             append(". ${vault.contents.entries.size} total.")

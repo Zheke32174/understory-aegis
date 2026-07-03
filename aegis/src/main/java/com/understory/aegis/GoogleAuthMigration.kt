@@ -73,7 +73,16 @@ object GoogleAuthMigration {
         // Google's URI is URL-encoded base64; android.net.Uri already
         // decodes the percent-encoding. The result is bare base64 (which
         // may contain + and / and = padding).
-        val payload = Base64.decode(dataParam, Base64.DEFAULT)
+        //
+        // Hardening (design §6 D-S6, fixture-gated): an offline-decoded URI
+        // pasted into a text file can carry a literal `+`, which
+        // Uri.getQueryParameter turns into a space; Base64.decode(DEFAULT) then
+        // rejects the embedded whitespace. On-screen QRs percent-encode so this
+        // never happens live, but the file path can. Strip ASCII whitespace
+        // before decoding — base64 never legitimately contains whitespace, so
+        // this is a no-op for well-formed input and a fix for the `+`→space case.
+        val cleaned = dataParam.filterNot { it == ' ' || it == '\t' || it == '\n' || it == '\r' }
+        val payload = Base64.decode(cleaned, Base64.DEFAULT)
         return parsePayload(payload)
     }
 

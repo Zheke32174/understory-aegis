@@ -1,6 +1,6 @@
-# understory-aegis
+# understory-aegis — Understory OTP
 
-Rootless TOTP/HOTP authenticator: BiometricPrompt-gated vault, auto-refreshing codes, QR + otpauth:// import, IME code entry, tap-to-copy with EXTRA_IS_SENSITIVE.
+Rootless TOTP/HOTP authenticator (store name **Understory OTP**; package id stays `com.understory.aegis`). Parameter-correct codes (SHA1/256/512, 6/7/8-digit, any period; real HOTP counter advance), BiometricPrompt-gated vault, QR + otpauth:// + real Aegis Authenticator / Proton / Google-migration import, reachable export (encrypted `.usbe`, otpauth:// list, Aegis-compatible JSON), invalidated-key recovery + reset, and a scoped-unlock IME for typing codes without the clipboard. Complements — does not replace — Aegis Authenticator.
 
 Status: **alpha** (functional; working the release-blockers list in understory-common).
 

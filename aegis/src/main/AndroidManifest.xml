@@ -213,6 +213,21 @@
         </activity>
 
         <!--
+          IME auth-trampoline (design §2.2). Transparent, exported=false,
+          singleInstance, no-history: the IME launches it to obtain a scoped,
+          time-boxed unlock without touching MainActivity's lock-on-leave.
+          It draws nothing; only the BiometricPrompt sheet is visible.
+        -->
+        <activity
+            android:name=".AuthTrampolineActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Aegis.Transparent"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleInstance"
+            android:configChanges="uiMode|orientation|screenSize|keyboardHidden" />
+
+        <!--
           Aegis IME — list saved TOTP entries, tap to commitText() the
           current code into the focused field. No clipboard, no autofill
           IPC. Same crown-jewel pattern as passgen's IME.
@@ -238,7 +253,7 @@
         -->
         <provider
             android:name=".SuiteCapsProvider"
-            android:authorities="com.understory.aegis.suitecaps"
+            android:authorities="${applicationId}.suitecaps"
             android:exported="true"
             android:readPermission="com.understory.suite.CAPS"
             android:writePermission="com.understory.suite.CAPS_WRITE"

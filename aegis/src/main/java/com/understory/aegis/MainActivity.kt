@@ -61,21 +61,27 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
+import android.content.Intent
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import com.understory.security.A11yProbe
 import com.understory.security.Crypto
 import com.understory.security.Diagnostics
 import com.understory.security.DiagnosticsDump
 import com.understory.security.DiagnosticsScreen
-import com.understory.security.HotpSecret
 import com.understory.security.KeepAliveBackHandler
 import com.understory.security.OtpAuthEntry
 import com.understory.security.SecureButton
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
-import com.understory.security.Totp
+import com.understory.security.VaultImportScreen
+import com.understory.security.VaultRecovery
+import com.understory.security.VaultRecoveryScreen
+import com.understory.security.ui.Bg
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.crypto.Cipher
 
 /**
@@ -95,6 +101,11 @@ class MainActivity : FragmentActivity() {
             if (value == null) AegisVaultManager.clear()
             else AegisVaultManager.setUnlocked(value)
         }
+
+    // Pending "Open with…" import URI, observable by the composition. Set from
+    // onCreate's intent AND from onNewIntent (warm-task fix, design §6 D-S2) so
+    // opening a file while the task is already alive no longer silently drops it.
+    private val pendingImportUri = androidx.compose.runtime.mutableStateOf<android.net.Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         DiagnosticsDump.activateIfEng(this)
@@ -156,8 +167,9 @@ class MainActivity : FragmentActivity() {
         // URI here so it flows through unlock and lands in the import
         // screen with content pre-loaded — the user still has to unlock
         // with biometric and confirm explicitly. Mirrors passgen's flow.
-        val pendingImportUri: android.net.Uri? =
-            if (intent?.action == android.content.Intent.ACTION_VIEW) intent?.data else null
+        if (intent?.action == android.content.Intent.ACTION_VIEW) {
+            pendingImportUri.value = intent?.data
+        }
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -167,7 +179,7 @@ class MainActivity : FragmentActivity() {
                         unlockedRef = ::unlocked,
                         setUnlocked = { unlocked = it },
                         onClose = { finishAndRemoveTask() },
-                        pendingImportUri = pendingImportUri,
+                        pendingImportState = pendingImportUri,
                     )
                 }
             }
@@ -247,9 +259,25 @@ class MainActivity : FragmentActivity() {
             finishAndRemoveTask()
         }
     }
+
+    /**
+     * Warm-task "Open with aegis" (design §6 D-S2). launchMode="singleTask"
+     * means a second VIEW intent arrives here, not through onCreate, so the old
+     * onCreate-only read silently dropped it. Stash the URI in the observable
+     * holder and setIntent so recreation sees it too; the composition's
+     * unlock-gated import path picks it up.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Diagnostics.log("aegis.MainActivity", "onNewIntent (action=${intent.action})")
+        if (intent.action == Intent.ACTION_VIEW) {
+            setIntent(intent)
+            pendingImportUri.value = intent.data
+        }
+    }
 }
 
-private enum class Stage { Setup, Unlock, List, Add, Diagnostics }
+private enum class Stage { Setup, Unlock, Recovery, List, Add, Export, Import, Keyboard, Diagnostics }
 
 @Composable
 private fun AegisRoot(
@@ -257,25 +285,36 @@ private fun AegisRoot(
     unlockedRef: () -> UnlockedAegisVault?,
     setUnlocked: (UnlockedAegisVault?) -> Unit,
     onClose: () -> Unit,
-    pendingImportUri: android.net.Uri? = null,
+    pendingImportState: androidx.compose.runtime.MutableState<android.net.Uri?>,
 ) {
     val ctx = LocalContext.current
-    var stageName by rememberSaveable {
-        mutableStateOf(if (AegisVault.exists(ctx)) Stage.Unlock.name else Stage.Setup.name)
+    // Startup routing: an invalidated key (biometric change / lock-screen
+    // change) leaves the header on disk but the wrap key gone. Route straight
+    // to Recovery instead of a doomed BiometricPrompt (design §4.2).
+    val initialStage = remember {
+        when (VaultRecovery.keyStateAtStartup(ctx, AegisVault.exists(ctx))) {
+            VaultRecovery.VaultKeyState.NEVER_CREATED -> Stage.Setup
+            VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED -> Stage.Recovery
+            else -> Stage.Unlock
+        }
     }
+    var stageName by rememberSaveable { mutableStateOf(initialStage.name) }
     val stage = remember(stageName) { Stage.valueOf(stageName) }
     val setStage: (Stage) -> Unit = {
         Diagnostics.log("aegis.Root", "stage transition: $stageName → ${it.name}")
         stageName = it.name
     }
-    // Single-shot pending URI from "Open with…" — consumed once on first
-    // entry to Stage.Add. configChanges in the manifest skip recreation;
-    // if that ever changes the worst case is the user re-triggers via
-    // the file manager.
-    var pendingImport by remember { mutableStateOf(pendingImportUri) }
+    // Pending URI from "Open with…". Observed from the Activity-level state so
+    // onNewIntent (warm task) delivers here too. Consumed once on entry to Add.
+    var pendingImport by pendingImportState
     val backToList: () -> Unit = {
         pendingImport = null
         setStage(Stage.List)
+    }
+    // A fresh "Open with…" URI arriving while we're already on List routes into
+    // the unlock-gated Add import path.
+    LaunchedEffect(pendingImport, stage) {
+        if (pendingImport != null && stage == Stage.List) setStage(Stage.Add)
     }
     when (stage) {
         Stage.Setup -> {
@@ -287,10 +326,29 @@ private fun AegisRoot(
         }
         Stage.Unlock -> {
             KeepAliveBackHandler("aegis.Root.Unlock")
-            UnlockScreen(activity = activity, onUnlocked = {
-                setUnlocked(it)
-                setStage(if (pendingImport != null) Stage.Add else Stage.List)
-            }, onClose = onClose)
+            UnlockScreen(
+                activity = activity,
+                onUnlocked = {
+                    setUnlocked(it)
+                    setStage(if (pendingImport != null) Stage.Add else Stage.List)
+                },
+                onClose = onClose,
+                onInvalidated = { setStage(Stage.Recovery) },
+            )
+        }
+        Stage.Recovery -> {
+            KeepAliveBackHandler("aegis.Root.Recovery")
+            // keyUsable=false here: the recovery screen is reached because the
+            // key was destroyed, so export-first is impossible; restore-from-
+            // backup or reset are the two honest paths.
+            RecoveryScreen(
+                onReset = {
+                    setUnlocked(null)
+                    setStage(Stage.Setup)
+                },
+                onRestore = { setStage(Stage.Import) },
+                onClose = onClose,
+            )
         }
         Stage.List -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
@@ -298,6 +356,9 @@ private fun AegisRoot(
             ListScreen(
                 vault = v,
                 onAdd = { setStage(Stage.Add) },
+                onExport = { setStage(Stage.Export) },
+                onImport = { setStage(Stage.Import) },
+                onKeyboard = { setStage(Stage.Keyboard) },
                 onLock = {
                     v.lock()
                     setUnlocked(null)
@@ -309,9 +370,6 @@ private fun AegisRoot(
         Stage.Add -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
             BackHandler { backToList() }
-            // Consume `pendingImport` once: hand it to AddScreen as
-            // `incomingFileUri`, then null the holder so a recomposition
-            // doesn't replay the auto-import.
             val incoming = pendingImport
             if (incoming != null) {
                 pendingImport = null
@@ -322,6 +380,52 @@ private fun AegisRoot(
                 onCancel = backToList,
                 incomingFileUri = incoming,
             )
+        }
+        Stage.Export -> {
+            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            BackHandler { backToList() }
+            var plaintext by remember { mutableStateOf(false) }
+            if (plaintext) {
+                AegisPlaintextExportScreen(vault = v, onDone = { plaintext = false })
+            } else {
+                AegisExportFlow(
+                    vault = v,
+                    onExportPlaintext = { plaintext = true },
+                    onDone = backToList,
+                )
+            }
+        }
+        Stage.Import -> {
+            // Reached from Recovery (restore-from-backup). The shared import
+            // screen decrypts a .usbe under the user's recovery key. Needs an
+            // unlocked vault to merge into: if the key was invalidated we must
+            // reset first, so Import from Recovery routes through a fresh Setup.
+            val v = unlockedRef()
+            BackHandler {
+                setStage(if (v != null) Stage.List else Stage.Recovery)
+            }
+            if (v == null) {
+                // No unlockable vault (post-invalidation). Instruct: reset first.
+                RestoreNeedsResetScreen(
+                    onReset = {
+                        setUnlocked(null)
+                        setStage(Stage.Setup)
+                    },
+                    onBack = { setStage(Stage.Recovery) },
+                )
+            } else {
+                VaultImportScreen(
+                    port = AegisExportPort,
+                    onDone = backToList,
+                )
+            }
+        }
+        Stage.Keyboard -> {
+            // Requires an unlocked session so the affordance sits behind auth,
+            // consistent with the rest of the list actions.
+            unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            BackHandler { backToList() }
+            KeyboardEnablementScreen(onBack = backToList)
         }
         Stage.Diagnostics -> {
             BackHandler { backToList() }
@@ -377,7 +481,11 @@ private fun SetupScreen(
                 )
                 Box(modifier = Modifier.fillMaxWidth().background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp)).padding(12.dp)) {
                     Text(
-                        "Lost device = lost vault.\n\nThe Keystore-wrapped copy of the master cannot leave this device. Phase 2 adds an encrypted backup file with HOTP-gated recovery — that's the path to restoring on a new device.",
+                        "aegis keeps your seeds encrypted on this device only. To survive a " +
+                            "lost or reset phone — or a biometric / screen-lock change, which by " +
+                            "design destroys the key — export a backup after setup: an Understory " +
+                            "encrypted file, or an Aegis Authenticator-compatible JSON. There's an " +
+                            "Export button on the main screen.",
                         color = Color(0xFFFFB74D), fontSize = 11.sp,
                     )
                 }
@@ -424,6 +532,7 @@ private fun UnlockScreen(
     activity: FragmentActivity,
     onUnlocked: (UnlockedAegisVault) -> Unit,
     onClose: () -> Unit,
+    onInvalidated: () -> Unit,
 ) {
     val ctx = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
@@ -457,9 +566,14 @@ private fun UnlockScreen(
                                     v.lock()
                                     working = false
                                 }
-                            }.onFailure {
-                                error = "Vault decryption failed."
+                            }.onFailure { t ->
+                                // Route a destroyed key to Recovery, not a
+                                // dead-end (design §4.2).
                                 working = false
+                                if (VaultRecovery.classifyUnlockFailure(t) ==
+                                    VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                                ) onInvalidated()
+                                else error = "Vault decryption failed."
                             }
                         },
                         onError = { msg ->
@@ -469,8 +583,12 @@ private fun UnlockScreen(
                             error = "Authentication cancelled."; working = false
                         },
                     )
-                }.onFailure {
-                    error = "Crypto init failed: ${it.message}"; working = false
+                }.onFailure { t ->
+                    working = false
+                    if (VaultRecovery.classifyUnlockFailure(t) ==
+                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                    ) onInvalidated()
+                    else error = "Crypto init failed: ${t.message}"
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -519,6 +637,9 @@ private fun promptAuth(
 private fun ListScreen(
     vault: UnlockedAegisVault,
     onAdd: () -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
+    onKeyboard: () -> Unit,
     onLock: () -> Unit,
     onDiagnostics: () -> Unit,
 ) {
@@ -532,6 +653,10 @@ private fun ListScreen(
             delay(1000)
         }
     }
+
+    // Dismissible export-first nudge (design §4.2): recovery is only real if an
+    // export exists, so steer the user to make one. Session-scoped dismissal.
+    var nudgeDismissed by remember { mutableStateOf(false) }
 
     // Surface third-party accessibility services, since they can read on-
     // screen text. TOTP codes are by definition visible — if a malicious
@@ -577,9 +702,34 @@ private fun ListScreen(
                 Text("Review accessibility services")
             }
         }
+        // Export-first nudge: shown until dismissed. Ties recovery to §3 export.
+        if (!nudgeDismissed && vault.contents.entries.isNotEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxWidth()
+                    .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
+                    .padding(10.dp),
+            ) {
+                Text(
+                    "Make a backup so a biometric change or a lost phone doesn't lose " +
+                        "your codes. Tap Export.",
+                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                )
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SecureButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Export") }
+                SecureOutlinedButton(onClick = { nudgeDismissed = true }, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Later") }
+            }
+        }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SecureButton(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Add entry") }
             SecureOutlinedButton(onClick = onLock, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Lock") }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SecureOutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Export") }
+            SecureOutlinedButton(onClick = onImport, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Restore") }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SecureOutlinedButton(onClick = onKeyboard, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Keyboard") }
         }
         if (vault.contents.entries.isEmpty()) {
             Spacer(Modifier.height(20.dp))
@@ -595,20 +745,49 @@ private fun ListScreen(
                 modifier = Modifier.fillMaxWidth().weight(1f),
             ) {
                 items(vault.contents.entries, key = { it.id }) { entry ->
-                    EntryRow(
-                        entry = entry,
-                        nowSeconds = tickSeconds,
-                        onTap = { code ->
-                            copyCodeToClipboard(ctx, code)
-                            Toast.makeText(ctx, "Code copied (${entry.period}s clipboard window)",
-                                Toast.LENGTH_SHORT).show()
-                        },
-                        onLongPress = { deleteCandidate = entry },
-                    )
+                    if (entry.type == OtpAuthEntry.Type.HOTP) {
+                        HotpRow(
+                            entry = entry,
+                            onGenerate = {
+                                runCatching {
+                                    // Advance + persist BEFORE copying; propagate
+                                    // on save failure (no code served on desync).
+                                    val code = AegisCode.advanceHotp(vault, entry)
+                                    // HOTP codes don't expire on a clock; fixed 60s
+                                    // clipboard window, advertised honestly.
+                                    copyCodeToClipboard(ctx, code, windowSeconds = 60)
+                                    revision++
+                                    val newCounter = entry.counter + 1
+                                    Toast.makeText(
+                                        ctx,
+                                        "Code copied — counter advanced to $newCounter (60s clipboard window)",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }.onFailure {
+                                    Toast.makeText(ctx, "Generate failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            onLongPress = { deleteCandidate = entry },
+                        )
+                    } else {
+                        EntryRow(
+                            entry = entry,
+                            nowSeconds = tickSeconds,
+                            onTap = { code ->
+                                // Copy window = the entry's real period, and the
+                                // toast reads the SAME number (one source of truth,
+                                // design §5.4). Clear at the entry's period.
+                                copyCodeToClipboard(ctx, code, windowSeconds = entry.period)
+                                Toast.makeText(ctx, "Code copied (${entry.period}s clipboard window)",
+                                    Toast.LENGTH_SHORT).show()
+                            },
+                            onLongPress = { deleteCandidate = entry },
+                        )
+                    }
                 }
             }
         }
-        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
+        SecureOutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
             Text("Diagnostics")
         }
         com.understory.security.SuiteStatusFooter()
@@ -689,29 +868,18 @@ private fun EntryRow(
     onTap: (String) -> Unit,
     onLongPress: () -> Unit,
 ) {
-    // Compute the current code. For TOTP this is purely a function of time;
-    // for HOTP we'd need to increment counter on tap (deferred — not used
-    // by most authenticator workflows).
-    val secret = remember(entry.secretB64) { entry.secretBytes() }
-    // Wipe the decoded secret ByteArray when this row leaves composition
-    // (scroll-out, screen leave, vault lock). Without this, secrets sit
-    // decoded in heap until GC even after the user is "done with them",
-    // multiplied across every visible entry.
-    DisposableEffect(entry.secretB64) {
-        onDispose { com.understory.security.Crypto.wipe(secret) }
-    }
+    // TOTP code, generated with the entry's OWN algorithm / digits / period
+    // via AegisCode (the vendored Totp hardcodes SHA1/6/30 and would produce
+    // codes the issuer rejects for non-default entries — audit A-U1/A-U2).
+    // AegisCode owns the secret decode+wipe, so this row never holds the bytes.
     val code = remember(entry.id, nowSeconds / entry.period) {
-        runCatching { Totp.currentCode(secret, nowSeconds) }.getOrDefault("------")
+        runCatching { AegisCode.totp(entry, nowSeconds) }.getOrDefault("-".repeat(entry.digits))
     }
     val secondsLeft = entry.period - (nowSeconds % entry.period).toInt()
 
-    // Threat model: "screen is never secure even when device is" — TOTP
-    // codes are NEVER rendered to screen. Tap copies the current code to
-    // the clipboard via Clipboard.copySensitive (auto-clears at the
-    // period boundary) and the row's display stays redacted. The
-    // copy-with-auto-clear is the only path; there is no reveal mode.
-
-    // combinedClickable: tap copies; long-press opens the delete-confirm dialog.
+    // Threat model: "screen is never secure even when device is" — codes are
+    // NEVER rendered to screen. Tap copies the current code to the clipboard
+    // (auto-clears at the period boundary); the row display stays redacted.
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -731,11 +899,10 @@ private fun EntryRow(
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Always redacted. Render bullets sized + spaced like the
-                // formatted code so the row layout is stable as the code
-                // rotates. The current code never reaches the visual tree.
+                // Bullets sized to the entry's digit count (6/7/8), so the row
+                // layout is stable and the real code never reaches the tree.
                 Text(
-                    text = redactedCode(code),
+                    text = AegisCode.bullets(entry.digits),
                     color = Color(0xFF707070),
                     fontSize = 22.sp,
                 )
@@ -745,6 +912,44 @@ private fun EntryRow(
                     period = entry.period,
                 )
             }
+        }
+    }
+}
+
+/**
+ * HOTP row (design §1.4). No countdown ring, no auto-rendered code — HOTP codes
+ * are counter-based, not time-based. A deliberate "Generate next code" action
+ * advances + persists the counter, then copies. The code is never rendered at
+ * rest.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HotpRow(
+    entry: AegisEntry,
+    onGenerate: () -> Unit,
+    onLongPress: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1C1C1C), RoundedCornerShape(8.dp))
+            .combinedClickable(
+                onClick = { /* HOTP action is the explicit button, not the row */ },
+                onLongClick = onLongPress,
+            )
+            .padding(14.dp),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(entry.issuer.ifEmpty { "(no issuer)" },
+                    color = Color(0xFFE0E0E0), fontSize = 14.sp)
+                Text(
+                    (if (entry.account.isNotEmpty()) "${entry.account} · " else "") +
+                        "HOTP · counter ${entry.counter}",
+                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                )
+            }
+            SecureButton(onClick = onGenerate) { Text("Generate next code") }
         }
     }
 }
@@ -795,14 +1000,6 @@ private fun CountdownRing(secondsLeft: Int, period: Int) {
     }
 }
 
-/**
- * Render a TOTP code as bullets while preserving the visual width of
- * the standard 3+3 format. Aegis never renders the actual digits; this
- * placeholder keeps the row layout stable as codes rotate.
- */
-private fun redactedCode(code: String): String =
-    if (code.length == 6) "●●● ●●●" else "●".repeat(code.length).ifEmpty { "------" }
-
 private fun colorForCountdown(seconds: Int): Color = when {
     seconds <= 5 -> Color(0xFFEF5350)
     seconds <= 10 -> Color(0xFFFFB74D)
@@ -810,18 +1007,17 @@ private fun colorForCountdown(seconds: Int): Color = when {
 }
 
 /**
- * Copy a TOTP code to the system clipboard with sensitive flag and a
- * 30-second auto-clear, matching the period of the displayed code. The
- * Toast on the call site advertises this window — the auto-clear path
- * makes that promise true. After 30s the code is no longer valid for
- * authentication anyway, so leaving it in the clipboard offers no
- * legitimate benefit and trivially leaks via clipboard-history apps.
+ * Copy a code to the system clipboard with the sensitive flag and an auto-clear
+ * at [windowSeconds] — the SAME number the call site's toast advertises (one
+ * source of truth, design §5.4). For TOTP pass the entry's real period; for
+ * HOTP a fixed 60s. Previously this hardcoded 30s while the toast said the
+ * entry's period, an honesty bug (A-M2).
  */
-private fun copyCodeToClipboard(ctx: Context, code: String) {
+private fun copyCodeToClipboard(ctx: Context, code: String, windowSeconds: Int) {
     com.understory.security.Clipboard.copySensitive(
         context = ctx,
         text = code,
-        autoClearSeconds = 30,
+        autoClearSeconds = windowSeconds,
         label = "aegis-code",
     )
 }
@@ -834,14 +1030,20 @@ private fun AddScreen(
     incomingFileUri: android.net.Uri? = null,
 ) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var issuer by remember { mutableStateOf("") }
     var account by remember { mutableStateOf("") }
     var secretInput by remember { mutableStateOf("") }
+    var secretRevealed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var qrFeedback by remember { mutableStateOf<String?>(null) }
+    // Loading flag covering QR decode + file import (design §5.3 — none existed).
+    var working by remember { mutableStateOf(false) }
 
     // Gallery picker — SAF-backed, no READ_MEDIA_* permission required.
     // User picks one image at a time; we decode it in-process via ZXing.
+    // Decode + parse run OFF the main thread (Bg.cpu) so a big image can't ANR;
+    // the vault re-encrypt + disk write run on Bg.io. UI hops back to main.
     val qrPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
@@ -852,107 +1054,87 @@ private fun AddScreen(
             qrFeedback = null
             return@rememberLauncherForActivityResult
         }
-        val decoded = QrDecoder.decode(ctx, uri)
-        if (decoded == null) {
-            qrFeedback = "Couldn't read a QR from that image. Try a clearer screenshot."
-            return@rememberLauncherForActivityResult
-        }
-
-        // Branch on QR contents:
-        //   otpauth-migration:// → Google Auth bulk export, may contain N entries
-        //   otpauth://         → single-entry standard URI
-        //   anything else      → treated as raw base32 secret
-        if (GoogleAuthMigration.isMigrationUri(decoded)) {
-            runCatching {
-                val import = GoogleAuthMigration.parse(decoded)
-                if (import.entries.isEmpty()) {
-                    qrFeedback = "Google Auth export had no entries."
-                    return@rememberLauncherForActivityResult
-                }
-                // Bulk-add all entries directly. User reviews afterwards.
-                var added = 0
-                for (otp in import.entries) {
-                    val newEntry = AegisEntry.fromOtpAuth(otp)
-                    vault.contents = vault.contents.copy(
-                        entries = vault.contents.entries + newEntry,
-                    )
-                    otp.wipeSecret()
-                    added++
-                }
-                vault.save()
-                val batchNote = if (import.isMultiBatch) {
-                    " (batch ${import.batchIndex + 1}/${import.batchSize} — re-run import for the remaining batches)"
-                } else ""
-                qrFeedback = "Imported $added entries from Google Authenticator$batchNote"
-                // Keep the screen open so the user can scan more batches.
-            }.onFailure {
-                qrFeedback = "Couldn't parse Google Auth export: ${it.message}"
+        working = true
+        scope.launch {
+            val decoded = withContext(Bg.cpu) { QrDecoder.decode(ctx, uri) }
+            if (decoded == null) {
+                qrFeedback = "Couldn't read a QR from that image. Try a clearer screenshot."
+                working = false
+                return@launch
             }
-            return@rememberLauncherForActivityResult
-        }
 
-        // Standard otpauth:// or raw secret path.
-        secretInput = decoded
-        qrFeedback = "QR decoded — secret populated. Review issuer/account and Save."
-        runCatching {
-            val parsed = OtpAuthEntry.parse(decoded)
-            if (issuer.isBlank() && parsed.issuer.isNotEmpty()) issuer = parsed.issuer
-            if (account.isBlank() && parsed.account.isNotEmpty()) account = parsed.account
-            parsed.wipeSecret()
+            // Branch on QR contents:
+            //   otpauth-migration:// → Google Auth bulk export, may contain N entries
+            //   otpauth://         → single-entry standard URI
+            //   anything else      → treated as raw base32 secret
+            if (GoogleAuthMigration.isMigrationUri(decoded)) {
+                val outcome = runCatching {
+                    val import = withContext(Bg.cpu) { GoogleAuthMigration.parse(decoded) }
+                    if (import.entries.isEmpty()) {
+                        return@runCatching "Google Auth export had no entries."
+                    }
+                    // Route through the shared dedup-merge (design §3.4) so the
+                    // QR path dedups exactly like the file path.
+                    val result = AegisMerge.merge(vault.contents.entries, import.entries)
+                    import.entries.forEach { it.wipeSecret() }
+                    if (result.added > 0) {
+                        vault.contents = vault.contents.copy(entries = result.merged)
+                        withContext(Bg.io) { vault.save() }
+                    }
+                    val batchNote = if (import.isMultiBatch) {
+                        " (batch ${import.batchIndex + 1}/${import.batchSize} — re-run import for the remaining batches)"
+                    } else ""
+                    "Imported ${result.added} entries (skipped ${result.skipped} duplicates) from Google Authenticator$batchNote"
+                }
+                qrFeedback = outcome.getOrElse { "Couldn't parse Google Auth export: ${it.message}" }
+                working = false
+                return@launch
+            }
+
+            // Standard otpauth:// or raw secret path.
+            secretInput = decoded
+            qrFeedback = "QR decoded — secret populated. Review issuer/account and Save."
+            runCatching {
+                val parsed = OtpAuthEntry.parse(decoded)
+                if (issuer.isBlank() && parsed.issuer.isNotEmpty()) issuer = parsed.issuer
+                if (account.isBlank() && parsed.account.isNotEmpty()) account = parsed.account
+                parsed.wipeSecret()
+            }
+            working = false
         }
     }
 
-    // File-based importer (alongside the gallery QR picker). Accepts plain
-    // text files containing `otpauth-migration://` URIs, Proton Authenticator
-    // JSON exports, and generic OTP JSON dumps. Dedup is performed against
-    // the live vault by (issuer, account, secret bytes); existing entries
-    // are skipped and parsed secrets are wiped after the bulk save.
-    // Shared file-import body. Used by both the SAF picker callback and
-    // the LaunchedEffect for an "Open with…" incoming URI. Reads via
-    // contentResolver, parses, dedups against the existing vault by
-    // (issuer, account, secretB64), wipes parsed secrets after save.
+    // Shared file-import body. Reads via contentResolver, parses, dedups against
+    // the existing vault via the shared [AegisMerge] (design §3.4), wipes parsed
+    // secrets after save. All heavy work off the main thread.
     fun runFileImport(uri: android.net.Uri) {
-        runCatching {
-            val text = ctx.contentResolver.openInputStream(uri)?.use {
-                it.bufferedReader().readText()
-            } ?: throw IllegalStateException("Couldn't open the selected file")
-            val summary = FileImports.parseAuto(text.reader())
-            if (summary.entries.isEmpty()) {
-                val errs = if (summary.errors.isNotEmpty()) {
-                    " (${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"})"
-                } else ""
-                qrFeedback = "No entries found in that file$errs."
-                return@runCatching
-            }
-            val existing = vault.contents.entries.map {
-                Triple(it.issuer.lowercase(), it.account.lowercase(), it.secretB64)
-            }.toHashSet()
-            var added = 0
-            var skipped = 0
-            for (otp in summary.entries) {
-                val newEntry = AegisEntry.fromOtpAuth(otp)
-                val key = Triple(
-                    newEntry.issuer.lowercase(),
-                    newEntry.account.lowercase(),
-                    newEntry.secretB64,
-                )
-                if (key in existing) {
-                    skipped++
-                } else {
-                    existing += key
-                    vault.contents = vault.contents.copy(
-                        entries = vault.contents.entries + newEntry,
-                    )
-                    added++
+        working = true
+        scope.launch {
+            val outcome = runCatching {
+                val text = withContext(Bg.io) {
+                    ctx.contentResolver.openInputStream(uri)?.use {
+                        it.bufferedReader().readText()
+                    } ?: throw IllegalStateException("Couldn't open the selected file")
                 }
-                otp.wipeSecret()
+                val summary = withContext(Bg.cpu) { FileImports.parseAuto(text.reader()) }
+                if (summary.entries.isEmpty()) {
+                    val errs = if (summary.errors.isNotEmpty()) {
+                        " (${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"})"
+                    } else ""
+                    return@runCatching "No entries found in that file$errs."
+                }
+                val result = AegisMerge.merge(vault.contents.entries, summary.entries)
+                summary.entries.forEach { it.wipeSecret() }
+                if (result.added > 0) {
+                    vault.contents = vault.contents.copy(entries = result.merged)
+                    withContext(Bg.io) { vault.save() }
+                }
+                val errPart = if (summary.errorCount > 0) " — ${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"} skipped" else ""
+                val batchPart = summary.multiBatchHint?.let { " ($it)" } ?: ""
+                "Imported ${result.added} entries (skipped ${result.skipped} duplicates)$errPart.$batchPart"
             }
-            vault.save()
-            val errPart = if (summary.errorCount > 0) " — ${summary.errorCount} parse error${if (summary.errorCount == 1) "" else "s"} skipped" else ""
-            val batchPart = summary.multiBatchHint?.let { " ($it)" } ?: ""
-            qrFeedback = "Imported $added entries (skipped $skipped duplicates)$errPart.$batchPart"
-        }.onFailure {
-            qrFeedback = "Import failed: ${it.message ?: it.javaClass.simpleName}"
+            qrFeedback = outcome.getOrElse { "Import failed: ${it.message ?: it.javaClass.simpleName}" }
+            working = false
         }
     }
 
@@ -1031,6 +1213,16 @@ private fun AddScreen(
         ) {
             Text("Import from file (otpauth-migration / Proton)")
         }
+        if (working) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(10.dp))
+                Text("Working…", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+            }
+        }
         qrFeedback?.let {
             Text(
                 it,
@@ -1048,9 +1240,20 @@ private fun AddScreen(
             label = { Text("Account (e.g. you@example.com)") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        // Mask the secret / otpauth:// field by default (design §5.3 D-S3) — it
+        // holds the seed, and rendering it in plaintext after paste/QR decode is
+        // inconsistent with redacting 30s codes everywhere else. Eye toggle to
+        // reveal for verification.
         OutlinedTextField(
             value = secretInput, onValueChange = { secretInput = it },
             label = { Text("Secret or otpauth:// URI") },
+            visualTransformation = if (secretRevealed) VisualTransformation.None
+            else PasswordVisualTransformation(),
+            trailingIcon = {
+                TextButton(onClick = { secretRevealed = !secretRevealed }) {
+                    Text(if (secretRevealed) "Hide" else "Show", fontSize = 12.sp)
+                }
+            },
             modifier = Modifier.fillMaxWidth().height(120.dp),
         )
         error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
@@ -1058,41 +1261,48 @@ private fun AddScreen(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SecureButton(
                 onClick = {
-                    runCatching {
-                        val parsed = OtpAuthEntry.parse(secretInput.trim())
-                        // Form fields override URI-supplied issuer/account if non-empty.
-                        val finalIssuer = issuer.trim().ifEmpty { parsed.issuer }
-                        val finalAccount = account.trim().ifEmpty { parsed.account }
-                        if (parsed.secret.isEmpty()) {
-                            error = "Secret is empty."
-                            return@runCatching
-                        }
-                        val newEntry = AegisEntry.fromOtpAuth(parsed).copy(
-                            issuer = finalIssuer,
-                            account = finalAccount,
-                        )
-                        // Wipe the parsed.secret since AegisEntry.fromOtpAuth
-                        // already copied it into base64.
+                    error = null
+                    val parsed = try {
+                        OtpAuthEntry.parse(secretInput.trim())
+                    } catch (t: Throwable) {
+                        error = "Couldn't parse: ${t.message ?: "invalid input"}"
+                        return@SecureButton
+                    }
+                    val finalIssuer = issuer.trim().ifEmpty { parsed.issuer }
+                    val finalAccount = account.trim().ifEmpty { parsed.account }
+                    if (parsed.secret.isEmpty()) {
                         parsed.wipeSecret()
-                        vault.contents = vault.contents.copy(
-                            entries = vault.contents.entries + newEntry,
+                        error = "Secret is empty."
+                        return@SecureButton
+                    }
+                    val newEntry = AegisEntry.fromOtpAuth(parsed).copy(
+                        issuer = finalIssuer,
+                        account = finalAccount,
+                    )
+                    parsed.wipeSecret()
+                    working = true
+                    scope.launch {
+                        val outcome = runCatching {
+                            vault.contents = vault.contents.copy(
+                                entries = vault.contents.entries + newEntry,
+                            )
+                            withContext(Bg.io) { vault.save() }
+                        }
+                        working = false
+                        outcome.fold(
+                            onSuccess = {
+                                // Drop the live secret String references (Strings
+                                // can't be wiped, but this frees them for GC).
+                                secretInput = ""
+                                issuer = ""
+                                account = ""
+                                onSaved()
+                            },
+                            onFailure = { error = "Save failed: ${it.message}" },
                         )
-                        vault.save()
-                        // Drop the secret String references from Compose
-                        // state — secretInput holds the full base32 / URI
-                        // including the secret. Strings can't be wiped
-                        // (immutable, GC-bound), but reassigning to "" at
-                        // least drops the live reference so the next GC
-                        // can collect it.
-                        secretInput = ""
-                        issuer = ""
-                        account = ""
-                        onSaved()
-                    }.onFailure {
-                        error = "Couldn't parse: ${it.message ?: "invalid input"}"
                     }
                 },
-                enabled = secretInput.isNotBlank(),
+                enabled = secretInput.isNotBlank() && !working,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             ) {
                 Text("Save")

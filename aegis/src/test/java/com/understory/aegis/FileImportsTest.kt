@@ -73,6 +73,31 @@ class FileImportsTest {
     }
 
     @Test
+    fun migrationUriToleratesSpaceInBase64Data() {
+        // design §6 D-S6: a literal `+` in offline-decoded migration data becomes
+        // a space via Uri.getQueryParameter. GoogleAuthMigration strips ASCII
+        // whitespace before Base64.decode, so a data param with an embedded space
+        // still parses. Build a valid payload, base64 it, inject a space, and
+        // confirm the entry survives.
+        val payload = encodeMigrationPayload(
+            entries = listOf(OtpParam(
+                secret = HotpSecret.decodeBase32(sampleSecretBase32),
+                name = "sp", issuer = "Sp", algorithm = 1, digits = 1, type = 2, counter = 0,
+            )),
+            batchSize = 1, batchIndex = 0,
+        )
+        val b64 = android.util.Base64.encodeToString(payload, android.util.Base64.NO_WRAP)
+        // Inject a raw space mid-string (the `+`→space symptom). URL-encode the
+        // rest so getQueryParameter yields base64-with-a-space.
+        val withSpace = b64.substring(0, 4) + " " + b64.substring(4)
+        val uri = "otpauth-migration://offline?data=${java.net.URLEncoder.encode(withSpace, "UTF-8")}"
+        val summary = FileImports.parseMigrationUris(uri)
+        assertEquals(0, summary.errorCount)
+        assertEquals(1, summary.entries.size)
+        assertEquals("Sp", summary.entries[0].issuer)
+    }
+
+    @Test
     fun migrationUriParserFlagsBadLines() {
         val text = "otpauth-migration://offline?data=NOT_BASE64\nthis line isn't a uri"
         val summary = FileImports.parseMigrationUris(text)
@@ -246,6 +271,108 @@ class FileImportsTest {
         assertEquals(2, summary.entries.size)
         assertEquals(1, summary.errorCount)
         assertTrue(summary.errors[0].contains("entry 1"))
+    }
+
+    // ---------- Aegis Authenticator (real schema, design §3.2) ----------
+
+    @Test
+    fun detectsAegisAuthJson() {
+        val text = """{"version":1,"header":{"slots":null,"params":null},"db":{"version":3,"entries":[{"type":"totp","name":"a","issuer":"I","info":{"secret":"$sampleSecretBase32","algo":"SHA1","digits":6,"period":30}}]}}"""
+        assertEquals(FileImports.Format.AEGIS_AUTH_JSON, FileImports.detect(text))
+    }
+
+    @Test
+    fun aegisAuthJsonHappyPath() {
+        val json = """
+{"version":1,"header":{"slots":null,"params":null},"db":{"version":3,"entries":[
+  {"type":"totp","uuid":"1","name":"alice","issuer":"PyPI","note":"","info":{"secret":"$sampleSecretBase32","algo":"SHA256","digits":8,"period":60}},
+  {"type":"hotp","uuid":"2","name":"bob","issuer":"GitHub","note":"","info":{"secret":"$sampleSecretBase32","algo":"SHA1","digits":6,"counter":5}}
+]}}
+        """.trimIndent()
+        val summary = FileImports.parseAegisAuthJson(json)
+        assertEquals(0, summary.errorCount)
+        assertEquals(2, summary.entries.size)
+
+        val totp = summary.entries[0]
+        assertEquals("PyPI", totp.issuer)
+        assertEquals("alice", totp.account)
+        assertEquals(OtpAuthEntry.Type.TOTP, totp.type)
+        assertEquals(OtpAuthEntry.Algorithm.SHA256, totp.algorithm)
+        assertEquals(8, totp.digits)
+        assertEquals(60, totp.period)
+
+        val hotp = summary.entries[1]
+        assertEquals(OtpAuthEntry.Type.HOTP, hotp.type)
+        assertEquals(5L, hotp.counter)
+    }
+
+    @Test
+    fun aegisAuthJsonRejectsSteamPerEntryButKeepsOthers() {
+        val json = """
+{"version":1,"header":{"slots":null,"params":null},"db":{"version":3,"entries":[
+  {"type":"steam","uuid":"1","name":"s","issuer":"Steam","info":{"secret":"$sampleSecretBase32","algo":"SHA1","digits":5,"period":30}},
+  {"type":"totp","uuid":"2","name":"ok","issuer":"OK","info":{"secret":"$sampleSecretBase32","algo":"SHA1","digits":6,"period":30}}
+]}}
+        """.trimIndent()
+        val summary = FileImports.parseAegisAuthJson(json)
+        assertEquals(1, summary.entries.size)
+        assertEquals(1, summary.errorCount)
+        assertTrue(summary.errors[0].contains("Steam"))
+    }
+
+    @Test
+    fun aegisAuthJsonRejectsEncryptedVault() {
+        val json = """
+{"version":1,"header":{"slots":[{"type":1,"n":32768}],"params":{"nonce":"aa","tag":"bb"}},"db":"ENCRYPTED_BLOB"}
+        """.trimIndent()
+        try {
+            FileImports.parseAegisAuthJson(json)
+            fail("expected encrypted-vault rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("encrypted Aegis vault"))
+        }
+    }
+
+    @Test
+    fun aegisAuthJson_roundTripsThroughExporter() {
+        // Both directions must pass (design §3.3): export our entries to Aegis
+        // JSON, re-import, and confirm params survive.
+        val entries = listOf(
+            AegisEntry(
+                issuer = "PyPI", account = "alice",
+                secretB64 = android.util.Base64.encodeToString(
+                    HotpSecret.decodeBase32(sampleSecretBase32), android.util.Base64.NO_WRAP,
+                ),
+                type = OtpAuthEntry.Type.TOTP, digits = 8, period = 60,
+                algorithm = OtpAuthEntry.Algorithm.SHA512,
+            ),
+            AegisEntry(
+                issuer = "GitHub", account = "bob",
+                secretB64 = android.util.Base64.encodeToString(
+                    HotpSecret.decodeBase32(sampleSecretBase32), android.util.Base64.NO_WRAP,
+                ),
+                type = OtpAuthEntry.Type.HOTP, digits = 6, counter = 7,
+                algorithm = OtpAuthEntry.Algorithm.SHA1,
+            ),
+        )
+        val exported = AegisAuthExport.toAegisJson(entries)
+        assertEquals(FileImports.Format.AEGIS_AUTH_JSON, FileImports.detect(exported))
+        val summary = FileImports.parseAegisAuthJson(exported)
+        assertEquals(0, summary.errorCount)
+        assertEquals(2, summary.entries.size)
+        assertEquals(OtpAuthEntry.Algorithm.SHA512, summary.entries[0].algorithm)
+        assertEquals(8, summary.entries[0].digits)
+        assertEquals(60, summary.entries[0].period)
+        assertEquals(OtpAuthEntry.Type.HOTP, summary.entries[1].type)
+        assertEquals(7L, summary.entries[1].counter)
+    }
+
+    @Test
+    fun aegisAuthJson_detectPrecedesGenericEntriesBranch() {
+        // The generic branch keys on "entries"; the Aegis branch must win so the
+        // db.entries[].info shape isn't swallowed and silently failed.
+        val text = """{"version":1,"db":{"entries":[{"type":"totp","name":"a","info":{"secret":"$sampleSecretBase32"}}]}}"""
+        assertEquals(FileImports.Format.AEGIS_AUTH_JSON, FileImports.detect(text))
     }
 
     // ---------- parseAuto ----------

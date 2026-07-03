@@ -48,6 +48,55 @@ object AegisVaultManager {
     fun clear() {
         runCatching { unlocked?.lock() }
         unlocked = null
+        clearImeSession()
+    }
+
+    // -- IME session slot (design §2.2) ---------------------------------------
+    //
+    // A SEPARATE, time-boxed unlocked-vault grant for the IME, so the keyboard
+    // can be used while another app has focus WITHOUT weakening MainActivity's
+    // lock-on-leave invariant. The IME reads [imeSession] exclusively — never
+    // [current]. It is its own [UnlockedAegisVault] instance (its own unlockV2),
+    // so the app session and the IME session never share the KEK buffer and each
+    // wipes independently. TTL uses elapsedRealtime (monotonic; immune to
+    // wall-clock changes).
+    @android.annotation.SuppressLint("StaticFieldLeak")
+    @Volatile private var imeVault: UnlockedAegisVault? = null
+    @Volatile private var imeExpiresAtMs: Long = 0L
+
+    fun setImeSession(v: UnlockedAegisVault, ttlMs: Long) {
+        // Replace any prior session's vault so its KEK is wiped, not leaked.
+        val prior = imeVault
+        imeVault = v
+        imeExpiresAtMs = android.os.SystemClock.elapsedRealtime() + ttlMs
+        if (prior != null && prior !== v) runCatching { prior.lock() }
+    }
+
+    /** The IME reads THIS. Auto-expires and wipes on expiry. */
+    val imeSession: UnlockedAegisVault?
+        get() {
+            val v = imeVault ?: return null
+            if (android.os.SystemClock.elapsedRealtime() >= imeExpiresAtMs) {
+                runCatching { v.lock() }
+                imeVault = null
+                return null
+            }
+            return v
+        }
+
+    /** Millis remaining on the IME session (0 if none / expired). */
+    val imeSessionRemainingMs: Long
+        get() {
+            if (imeVault == null) return 0L
+            val left = imeExpiresAtMs - android.os.SystemClock.elapsedRealtime()
+            return if (left > 0) left else 0L
+        }
+
+    fun clearImeSession() {
+        val v = imeVault
+        imeVault = null
+        imeExpiresAtMs = 0L
+        if (v != null) runCatching { v.lock() }
     }
 
     @Volatile private var transientFlightCount = 0
