@@ -97,9 +97,12 @@ object AegisCode {
                 ((hash[offset + 1].toInt() and 0xFF) shl 16) or
                 ((hash[offset + 2].toInt() and 0xFF) shl 8) or
                 (hash[offset + 3].toInt() and 0xFF)
-        var mod = 1
-        repeat(digits) { mod *= 10 }
-        val codeInt = truncated % mod
+        // Long modulus: 10^10 overflows a 32-bit Int (digits can be up to 10
+        // via an unclamped otpauth:// `digits` param), which would wrap the
+        // divisor and yield wrong codes for 9/10-digit entries.
+        var mod = 1L
+        repeat(digits) { mod *= 10L }
+        val codeInt = (truncated.toLong() and 0xFFFFFFFFL) % mod
         return codeInt.toString().padStart(digits, '0')
     }
 
