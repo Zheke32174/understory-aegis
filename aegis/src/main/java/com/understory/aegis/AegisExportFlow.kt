@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -18,31 +19,32 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.understory.security.RecoveryCopy
+import com.understory.security.Crypto
 import com.understory.security.SecureButton
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.VaultExportScreen
-import com.understory.security.VaultRecovery
-import com.understory.security.ui.components.SuiteCard
 import com.understory.security.ui.theme.UnderstoryAccent
 import com.understory.security.ui.theme.UnderstoryTheme
 
 /**
- * aegis's Export flow (design §3.1 output #3 / §4). NEW screen — authored
- * token-native with the shared components + [UnderstoryTheme] per the wave-2
- * rule. Wraps the shared [VaultExportScreen]:
+ * aegis's Export flow (design §3.1 output #3 / §4).
  *
- *   1. Mint a fresh recovery key ([VaultRecovery.newRecoveryKey]).
- *   2. REVEAL it once (grouped, off-device-save guidance). The user confirms
- *      they saved it — this is the ONLY thing that can decrypt the export, so
- *      losing it means the backup is useless (honest §4).
- *   3. Hand the key to the shared encrypted-export screen, which writes the
- *      `.usbe` under it. The plaintext-interop path ([onExportPlaintext])
- *      offers the otpauth:// list and Aegis-compatible JSON outputs (#1/#2).
+ * THREAT-MODEL INVARIANT (screen-emanation defense): the value that can
+ * decrypt a backup is NEVER rendered on screen — not as text, not grouped
+ * for transcription, not as a QR code. A camera or Van-Eck capture of the
+ * display would otherwise leak the ultimate secret, which FLAG_SECURE does
+ * not prevent. So instead of minting a random recovery key and revealing it,
+ * the user SUPPLIES a recovery passphrase (masked entry, never displayed or
+ * stored). That passphrase encrypts the `.usbe` and is what the user types
+ * on restore. Losing it means the backup is useless (honest §4).
  *
- * The recovery key CharArray is owned here and wiped on dispose.
+ * The plaintext-interop path ([onExportPlaintext]) offers the otpauth:// list
+ * and Aegis-compatible JSON outputs (#1/#2).
+ *
+ * The passphrase CharArray handed to the export screen is owned here and wiped
+ * on dispose.
  */
 @Composable
 fun AegisExportFlow(
@@ -51,23 +53,29 @@ fun AegisExportFlow(
     onDone: () -> Unit,
 ) {
     UnderstoryTheme(accent = UnderstoryAccent.AEGIS) {
-        // Mint once per entry into this flow. Key lifecycle is owned here.
-        val recoveryKey = remember { VaultRecovery.newRecoveryKey() }
-        DisposableEffect(Unit) { onDispose { recoveryKey.wipe() } }
+        var passphrase by remember { mutableStateOf("") }
+        var confirm by remember { mutableStateOf("") }
+        var committed by remember { mutableStateOf(false) }
 
-        var confirmed by remember { mutableStateOf(false) }
-
-        if (!confirmed) {
-            RecoveryKeyReveal(
-                keyChars = recoveryKey.chars,
-                onConfirmed = { confirmed = true },
+        if (!committed) {
+            RecoveryPassphraseEntry(
+                passphrase = passphrase,
+                onPassphrase = { passphrase = it },
+                confirm = confirm,
+                onConfirm = { confirm = it },
+                onProceed = { committed = true },
                 onCancel = onDone,
             )
         } else {
+            // Hand the RAW passphrase chars to the shared encrypted-export
+            // screen (VaultImportScreen decrypts with the raw typed value, so
+            // encrypt must match — do NOT normalize here).
+            val keyChars = remember { passphrase.toCharArray() }
+            DisposableEffect(Unit) { onDispose { Crypto.wipe(keyChars) } }
             VaultExportScreen(
                 port = AegisExportPort,
                 unlocked = vault,
-                recoveryKey = recoveryKey.chars,
+                recoveryKey = keyChars,
                 onDone = onDone,
                 onExportPlaintext = onExportPlaintext,
             )
@@ -75,22 +83,25 @@ fun AegisExportFlow(
     }
 }
 
+private const val MIN_PASSPHRASE_LEN = 8
+
 /**
- * One-time reveal of the freshly minted recovery key. Renders the grouped form
- * for transcription; the actual characters ARE shown here (this is the one
- * moment the user must capture them), but never announced by TalkBack via the
- * value — the SuiteCard reads its label. No clipboard button: per
- * [RecoveryCopy.CLIPBOARD_RECOVERY_KEY_WARNING] we steer to off-device saving.
+ * Collect a recovery passphrase the user chooses. Both fields are masked;
+ * nothing secret is ever rendered. The user is supplying their own secret
+ * (the accepted password-entry pattern), not the app emanating a stored one.
  */
 @Composable
-private fun RecoveryKeyReveal(
-    keyChars: CharArray,
-    onConfirmed: () -> Unit,
+private fun RecoveryPassphraseEntry(
+    passphrase: String,
+    onPassphrase: (String) -> Unit,
+    confirm: String,
+    onConfirm: (String) -> Unit,
+    onProceed: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    val grouped = remember(keyChars) {
-        com.understory.security.RecoveryKeyCodec.grouped(keyChars)
-    }
+    val longEnough = passphrase.length >= MIN_PASSPHRASE_LEN
+    val matches = passphrase == confirm
+    val valid = longEnough && matches
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -99,38 +110,53 @@ private fun RecoveryKeyReveal(
         verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
     ) {
         Text(
-            RecoveryCopy.RECOVERY_KEY_TITLE,
+            "Set a recovery passphrase",
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurface,
         )
         Text(
-            RecoveryCopy.RECOVERY_KEY_BODY,
+            "This passphrase encrypts your backup file. It is never shown on " +
+                "screen or stored anywhere — if you lose it, the backup cannot " +
+                "be opened. Choose something strong you'll remember, or keep it " +
+                "in your password manager.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        SuiteCard {
+        OutlinedTextField(
+            value = passphrase,
+            onValueChange = onPassphrase,
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            label = { Text("Recovery passphrase") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = confirm,
+            onValueChange = onConfirm,
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            label = { Text("Confirm passphrase") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (passphrase.isNotEmpty() && !longEnough) {
             Text(
-                grouped,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
+                "Use at least $MIN_PASSPHRASE_LEN characters.",
+                style = MaterialTheme.typography.bodySmall,
+                color = UnderstoryTheme.semantic.warning,
+            )
+        } else if (confirm.isNotEmpty() && !matches) {
+            Text(
+                "The two entries don't match.",
+                style = MaterialTheme.typography.bodySmall,
+                color = UnderstoryTheme.semantic.warning,
             )
         }
-        Text(
-            RecoveryCopy.CLIPBOARD_RECOVERY_KEY_WARNING,
-            style = MaterialTheme.typography.bodySmall,
-            color = UnderstoryTheme.semantic.warning,
-        )
-        Text(
-            RecoveryCopy.RECOVERY_KEY_CONFIRM,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
         Spacer(Modifier.height(4.dp))
-        SecureButton(onClick = onConfirmed, modifier = Modifier.fillMaxWidth()) {
-            Text("I saved it — continue to export")
-        }
+        SecureButton(
+            onClick = onProceed,
+            enabled = valid,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Continue to export") }
         SecureOutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
             Text("Cancel")
         }
