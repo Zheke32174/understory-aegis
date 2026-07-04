@@ -22,5 +22,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "aegis"
 include(":common-security")
+include(":elevation")
 include(":common-backup")
 include(":aegis")

@@ -85,6 +85,7 @@ android {
 
 dependencies {
     implementation(project(":common-security"))
+    implementation(project(":elevation"))
     implementation(project(":common-backup"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
