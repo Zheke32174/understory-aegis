@@ -856,6 +856,18 @@ private fun ListScreen(
     // threat surface explicit.
     val a11yState = remember { A11yProbe.check(ctx) }
 
+    // Overlay-attack sentinel (OverlaySentinel): READ-ONLY, FAIL-OPEN. Only does
+    // anything when an elevated shell is granted; otherwise it stays Inactive and
+    // no banner shows (FLAG_SECURE still protects the screen — no dead control).
+    // Re-scans each visible second alongside the code countdown, so a mid-session
+    // overlay is caught. Any parse miss degrades silently to Inactive.
+    var overlayResult by remember {
+        mutableStateOf<OverlaySentinel.Result>(OverlaySentinel.Result.Inactive)
+    }
+    LaunchedEffect(tickSeconds) {
+        overlayResult = OverlaySentinel.scan(ctx)
+    }
+
     // Long-press on a row stages the entry for deletion. Confirmation
     // happens in an AlertDialog — accidental long-press is non-destructive.
     var deleteCandidate by remember { mutableStateOf<AegisEntry?>(null) }
@@ -937,6 +949,8 @@ private fun ListScreen(
                 onDismissNudge = { nudgeDismissed = true },
                 onExport = onExport,
                 revision = revision,
+                overlayResult = overlayResult,
+                onReviewOverlay = { openOverlaySettings(ctx) },
                 onReviewA11y = { A11yProbe.openA11ySettings(ctx) },
                 onCopyTotp = { entry, code ->
                     // Copy window = the entry's real period, and the toast reads the
@@ -1056,6 +1070,8 @@ private fun CodesTab(
     onDismissNudge: () -> Unit,
     onExport: () -> Unit,
     revision: Int,
+    overlayResult: OverlaySentinel.Result,
+    onReviewOverlay: () -> Unit,
     onReviewA11y: () -> Unit,
     onCopyTotp: (AegisEntry, String) -> Unit,
     onGenerateHotp: (AegisEntry) -> Unit,
@@ -1107,6 +1123,23 @@ private fun CodesTab(
                     stringResource(R.string.entries_count, entries.size),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        // Overlay-attack banner: only present when the sentinel positively
+        // detected an untrusted app drawing over us (Active). Inactive — the
+        // fail-open / unelevated / parse-miss state — renders nothing, leaving
+        // the existing FLAG_SECURE posture untouched.
+        (overlayResult as? OverlaySentinel.Result.Active)?.let { active ->
+            item(key = "__overlay") {
+                WarningCard(
+                    text = stringResource(
+                        R.string.overlay_warning,
+                        active.packages.joinToString(", "),
+                    ),
+                    actionLabel = stringResource(R.string.overlay_warning_review),
+                    onAction = onReviewOverlay,
                 )
             }
         }
@@ -1251,6 +1284,28 @@ private fun WarningCard(text: String, actionLabel: String, onAction: () -> Unit)
         SecureOutlinedButton(onClick = onAction, modifier = Modifier.fillMaxWidth()) {
             Text(actionLabel)
         }
+    }
+}
+
+/**
+ * Surface the system "draw over other apps" screen so the user can review /
+ * revoke the offending app's overlay permission themselves. Read-only routing —
+ * aegis does not revoke on the user's behalf here (the sentinel is detection,
+ * not enforcement). Falls back to the app's own details screen, then to the
+ * top-level app-list settings, if the primary intent can't resolve.
+ */
+private fun openOverlaySettings(ctx: Context) {
+    val intents = listOf(
+        Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
+        Intent(android.provider.Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS),
+    )
+    for (intent in intents) {
+        val ok = runCatching {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(intent)
+            true
+        }.getOrDefault(false)
+        if (ok) return
     }
 }
 

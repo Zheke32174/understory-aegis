@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Strings for the overlay-attack sentinel (OverlaySentinel.kt) surfaced on the
+  OTP list. Kept in a feature-scoped file so the shared strings.xml stays
+  untouched. FAIL-OPEN copy only names apps we actually detected; it never
+  claims certainty about intent.
+-->
+<resources>
+    <!-- %1$s = comma-separated app package name(s) currently drawing over us. -->
+    <string name="overlay_warning">An app can draw over this screen: %1$s. It could sit on top of your codes to trick or watch you. Review it before you read a code.</string>
+    <string name="overlay_warning_review">Review drawing-over-apps</string>
+</resources>
