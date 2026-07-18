@@ -1,0 +1,36 @@
+apiVersion: modos.pleiades/v1alpha1
+kind: Component
+metadata:
+  name: understory-aegis-authenticator
+  repository: Zheke32174/understory-aegis
+  visibility: public
+  lifecycle: experimental
+  defaultBranch: main
+spec:
+  roles:
+    - mobile-authenticator
+    - one-time-password-provider
+    - local-second-factor-interface
+  authority: local-enforcement
+  inputs:
+    - locally-protected-authenticator-secrets
+    - user-presence
+    - time-or-challenge-state
+  outputs:
+    - one-time-codes
+    - signed-local-authentication-events
+  capabilitiesProvided:
+    - identity.second-factor.local
+    - otp.generate.local
+    - authentication.event.append
+  capabilitiesRequired:
+    - secret.mobile.local
+    - identity.user.local
+    - secure-clock.local
+  dataClasses:
+    - public
+    - private
+    - secret
+  failurePolicy: fail-closed
+  promotionPolicy: signed-pr
+  notes: Aegis supplies a local factor and never exports seed material or grants domain authority by itself.
