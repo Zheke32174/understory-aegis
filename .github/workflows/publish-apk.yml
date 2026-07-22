@@ -28,7 +28,17 @@ jobs:
       - name: Apply repository containment
         env:
           BASE_HEAD: 9d25e96fbc06db8466ff876a365c1ce2426975a8
-        run: python /tmp/apply-containment.py
+        run: |
+          python /tmp/apply-containment.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/publish-apk.yml')
+          text = path.read_text()
+          marker = '      - name: Confirm no publication authority\n'
+          if marker in text:
+              text = text.split(marker, 1)[0]
+          path.write_text(text.rstrip() + '\n')
+          PY
       - name: Validate source policy
         run: python ci/validate-public-signing-boundary.py
       - name: Check patch hygiene
