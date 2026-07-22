@@ -1,42 +1,41 @@
 # understory-aegis — Understory OTP
 
-Rootless TOTP/HOTP authenticator (store name **Understory OTP**; package id stays `com.understory.aegis`). Parameter-correct codes (SHA1/256/512, 6/7/8-digit, any period; real HOTP counter advance), BiometricPrompt-gated vault, QR + otpauth:// + real Aegis Authenticator / Proton / Google-migration import, reachable export (encrypted `.usbe`, otpauth:// list, Aegis-compatible JSON), invalidated-key recovery + reset, and a scoped-unlock IME for typing codes without the clipboard. Complements — does not replace — Aegis Authenticator.
+Rootless TOTP/HOTP authenticator (store name **Understory OTP**; package id remains `com.understory.aegis`). The project is alpha and is still working through the suite release blockers.
 
-Status: **alpha** (functional; working the release-blockers list in understory-common).
+## Security and distribution hold
 
-## Build
+**Do not treat historical CI/debug APKs as authenticated releases.** The suite's former shared debug private key became public when the Android repositories were split from a private source. Its certificate can no longer prove authorship, integrity, sibling identity, or capability authority.
 
-Requires JDK 17+ and the Android SDK with platform 35 + build-tools 35.0.0.
+Automatic GitHub Release publication of debug APKs is disabled on this draft. The repository currently provides source and read-only validation only. A future downloadable release must be built with the separately held offline release key, carry checksums and provenance, and pass the coordinated suite migration checks.
+
+Previously installed APKs signed with the revoked debug identity will not update in place to a release-signed APK. Android requires uninstalling the old debug build before installing a differently signed release candidate.
+
+## Local development build
+
+Requires JDK 17+ and Android SDK platform 35 with build-tools 35.0.0.
 
 ```bash
-# Copy local.properties.example to local.properties, set sdk.dir
 gradle :aegis:assembleDebug
-# APK: aegis/build/outputs/apk/debug/aegis-debug.apk
+gradle test
 ```
 
-CI (GitHub Actions) builds the debug APK + runs unit tests on every push; the APK is attached as a workflow artifact. Debug builds are signed with the committed suite debug keystore so the signing-cert digest matches the suite pin (Tamper.EXPECTED_CERT_SHA256) — installs update-in-place over other suite-pin builds.
+Local debug builds are development fixtures only. They are not supported distribution artifacts and must not be represented as suite-authenticated releases.
 
-## Provenance & suite
+## Provenance and suite relationship
 
-Split 2026-07-02 from `Zheke32174/underward` `android/` (commit `f867493`) into per-app repos — one repo per suite app.
+Split 2026-07-02 from private `Zheke32174/underward` `android/` at commit `f867493` into per-app repositories.
 
-Part of the **Understory Suite** — rootless, in-bounds, local-first Android security apps (design constraints: no root, no Shizuku, public APIs only, zero network unless explicitly opted in).
+Part of the Understory Suite: rootless, local-first Android security applications using public Android APIs and no network access unless explicitly enabled by the user.
 
-Shared modules vendored here for a self-contained build: `common-security/` (+ `common-backup/`, `overlay-*/` where used) and `keystore/` (pinned suite debug keystore — cert digest is the Tamper/SuiteAttestation pin). **Do not edit shared modules in this repo.** Their canonical home is [`understory-common`](https://github.com/Zheke32174/understory-common); propagate changes with its `tools/sync-common.sh`.
+Shared modules are vendored for self-contained builds. Their canonical editing home is [`understory-common`](https://github.com/Zheke32174/understory-common). The signing-identity containment and migration source is draft PR #5 there; downstream trust-root removal must remain synchronized with that canonical change.
 
-Suite-level docs (SUITE_DESIGN, SUITE_ROADMAP, RELEASE_BLOCKERS, SAMSUNG_QUIRKS, BlackArch defense matrix + runbooks) live in `understory-common`.
+## Release verification target
 
-## Verify your install
+A future release candidate must prove all of the following before publication:
 
-Before trusting the app, confirm the APK you are about to install (or did install) is signed by the suite key. With Android build-tools on any machine:
-
-```bash
-apksigner verify --print-certs the-downloaded.apk | grep -i 'SHA-256'
-```
-
-The signer certificate SHA-256 digest must be exactly one of the two suite pins (single source of truth: `common-security/.../SuitePins.kt`):
-
-- **Debug** builds (CI artifacts; committed suite debug keystore): `aba68a81a0d63b5549794e586875a4f04e6dba3a6fe25d363e04eb75f46df69e`
-- **Release** builds (offline release keystore): `59a3dee7feb8262170e4dcabb3dbe7bc323abe8715ab49f5bed5133046a45c4a`
-
-Any other digest means the APK was not signed by the suite keys — do not install it. The apps also enforce these pins at runtime (Tamper self-check + SuiteAttestation cross-check of installed siblings), but verifying before install is the stronger position. Signing doctrine: `docs/SIGNING.md` in understory-common.
+- signed by the offline release certificate declared by the canonical suite source;
+- self-signature enforcement succeeds;
+- sibling attestation rejects debug/re-signed peers;
+- untrusted peers contribute no capabilities;
+- checksums and source commit are verified by the consumer;
+- install, update, rollback, export, and removal behavior are documented and tested.
