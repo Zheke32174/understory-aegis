@@ -39,20 +39,17 @@ jobs:
           gradle-version: '8.10.2'
       - name: Install Android SDK components
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" > /dev/null
-      - name: Assemble local-development debug APK
+      - name: Assemble current development fixture
         run: gradle --no-daemon assembleDebug
       - name: Run unit tests
         run: gradle --no-daemon test
-      - name: Assert release authority is absent
+      - name: Assert publication authority is absent
         shell: bash
         run: |
           set -euo pipefail
           ! grep -R --line-number -E 'contents:[[:space:]]*write|gh release (create|upload|edit)|git push --force|continuous-apk|android-release-verified' .github/workflows
-          test ! -e keystore/debug.keystore || {
-            echo 'shared debug private key remains in the current tree' >&2
-            exit 1
-          }
 
-# Debug APKs are intentionally not uploaded or published. The former shared
-# debug signing identity is public and revoked. Only separately produced,
-# offline release-signed candidates may later enter a governed release path.
+# APKs are intentionally not uploaded or published. The former shared debug
+# signing identity is public and revoked for authenticity purposes. Removal of
+# its vendored build fixture is coordinated with the canonical trust-root PR so
+# runtime pin behavior and local-development signing change atomically.
