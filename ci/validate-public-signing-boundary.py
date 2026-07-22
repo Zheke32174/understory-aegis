@@ -1,10 +1,10 @@
-
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
 
 root = Path(__file__).resolve().parents[1]
 errors = []
+
 if (root / "keystore/debug.keystore").exists():
     errors.append("committed debug.keystore is forbidden")
 
@@ -25,6 +25,17 @@ for forbidden in ("contents: write", "gh release", "git tag", "git push --force"
         errors.append(f"publication authority remains: {forbidden}")
 if "contents: read" not in workflow:
     errors.append("validation workflow is not read-only")
+
+readme = (root / "README.md").read_text()
+for forbidden in (
+    "committed suite debug keystore",
+    "APK is attached as a workflow artifact",
+    "Tamper.EXPECTED_CERT_SHA256",
+):
+    if forbidden in readme:
+        errors.append(f"README retains retired signing/distribution claim: {forbidden}")
+if "Debug APKs cannot be authenticated as Understory distributions" not in readme:
+    errors.append("README does not state the debug artifact trust boundary")
 
 for rel, marker in [
     ("common-security/src/main/java/com/understory/security/Tamper.kt", "if (BuildConfig.DEBUG) return true"),
