@@ -32,7 +32,6 @@ jobs:
         run: |
           set -euo pipefail
           python ci/validate-public-signing-boundary.py
-          gradle --version
           git diff --check
       - name: Commit repaired branch
         run: |
