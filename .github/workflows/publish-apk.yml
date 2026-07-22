@@ -15,7 +15,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: security/public-signing-containment-v1
-          fetch-depth: 0
+          fetch-depth: 1
+          show-progress: false
       - name: Import exact repaired shared trust boundary
         run: |
           set -euo pipefail
@@ -28,11 +29,10 @@ jobs:
         env:
           BASE_HEAD: 9d25e96fbc06db8466ff876a365c1ce2426975a8
         run: python /tmp/apply-containment.py
-      - name: Verify bounded result
-        run: |
-          set -euo pipefail
-          python ci/validate-public-signing-boundary.py
-          git diff --check
+      - name: Validate source policy
+        run: python ci/validate-public-signing-boundary.py
+      - name: Check patch hygiene
+        run: git diff --check
       - name: Commit repaired branch
         run: |
           set -euo pipefail
