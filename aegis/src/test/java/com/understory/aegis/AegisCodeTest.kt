@@ -62,8 +62,8 @@ class AegisCodeTest {
     @Test fun sha256_t1111111109() =
         assertEquals("68084774", AegisCode.totp(entry(asciiSeed(32), OtpAuthEntry.Algorithm.SHA256), 1111111109L))
 
-    @Test fun sha256_t2000000000() =
-        assertEquals("77737706", AegisCode.totp(entry(asciiSeed(32), OtpAuthEntry.Algorithm.SHA256), 2000000000L))
+    @Test fun sha256_t20000000000() =
+        assertEquals("77737706", AegisCode.totp(entry(asciiSeed(32), OtpAuthEntry.Algorithm.SHA256), 20000000000L))
 
     // --- SHA512 8-digit vectors ---
 
