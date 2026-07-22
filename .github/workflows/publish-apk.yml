@@ -36,12 +36,13 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" > /dev/null
       - name: Assemble local debug APK
         run: gradle --no-daemon assembleDebug
-      - name: Run unit tests with bounded failure receipt
-        shell: bash
-        run: |
-          set -o pipefail
-          if ! gradle --no-daemon test --console=plain > unit-test.log 2>&1; then
-            tail -n 250 unit-test.log
-            exit 1
-          fi
-          tail -n 80 unit-test.log
+      - name: Run unit tests
+        run: gradle --no-daemon test --console=plain > unit-test.log 2>&1
+      - name: Upload unit-test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unit-test-receipt-${{ github.sha }}
+          path: unit-test.log
+          if-no-files-found: error
+          retention-days: 14
